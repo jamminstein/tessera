@@ -12,6 +12,7 @@
 -- K2: play/stop
 -- K3: hold + E3 for secondary param
 --     tap on spectral page = freeze
+-- K1+K3: toggle bandmate
 --
 -- grid top 4 rows: rhythm steps
 -- grid bottom 4 rows: pitch chain
@@ -22,6 +23,7 @@ engine.name = "Tessera"
 local musicutil = require "musicutil"
 local Repetitor = include "lib/repetitor"
 local Ziggurat = include "lib/ziggurat"
+local Bandmate = include "lib/bandmate"
 
 ----------------------------------------------------------------
 -- state
@@ -29,6 +31,7 @@ local Ziggurat = include "lib/ziggurat"
 
 local rep = nil
 local zig = nil
+local mate = nil
 local g = grid.connect()
 local midi_out = nil
 
@@ -40,6 +43,7 @@ local sel_param = 1      -- selected param within page
 local screen_dirty = true
 local grid_dirty = true
 
+local key1_held = false
 local key3_held = false
 local grid_held = nil    -- {ch=, step=} when holding a pitch grid key
 
@@ -53,6 +57,8 @@ local DIV_NAMES = {"1/4", "1/8", "1/16", "1/32"}
 
 local SPECTRAL_PARAMS = {"partials", "tilt", "spread", "filter", "filter_q", "decay", "delay_send"}
 
+local beat_count = 0  -- for bandmate tick timing
+
 ----------------------------------------------------------------
 -- init
 ----------------------------------------------------------------
@@ -60,6 +66,7 @@ local SPECTRAL_PARAMS = {"partials", "tilt", "spread", "filter", "filter_q", "de
 function init()
   rep = Repetitor.new()
   zig = Ziggurat.new()
+  mate = Bandmate.new(rep, zig)
 
   -- global params
   params:add_separator("TESSERA")
@@ -215,6 +222,22 @@ function step_clock()
   while true do
     clock.sync(DIVISIONS[params:get("division")])
     if playing then
+      -- bandmate ticks once per beat (every 4 sixteenths at 1/16 division)
+      beat_count = beat_count + 1
+      local div_idx = params:get("division")
+      local ticks_per_beat = math.floor(0.25 / DIVISIONS[div_idx])
+      if ticks_per_beat < 1 then ticks_per_beat = 1 end
+      if beat_count % ticks_per_beat == 0 then
+        mate:tick()
+        -- sync freeze state from bandmate
+        for i = 1, 4 do
+          if mate.frozen_channels[i] then engine_freeze[i] = 1
+          elseif not mate.frozen_channels[i] and mate.active then
+            -- bandmate may have unfrozen
+          end
+        end
+      end
+
       for ch = 1, 4 do
         local hit, accent = rep:advance(ch)
         if hit then
@@ -323,22 +346,35 @@ end
 ----------------------------------------------------------------
 
 function key(n, z)
-  if n == 2 and z == 1 then
+  if n == 1 then
+    key1_held = z == 1
+
+  elseif n == 2 and z == 1 then
     if playing then
       playing = false
       all_notes_off()
       rep:reset()
       zig:reset()
+      beat_count = 0
     else
       playing = true
     end
 
   elseif n == 3 then
     key3_held = z == 1
-    if z == 1 and page == 3 then
-      -- toggle freeze on selected channel
-      engine_freeze[sel_ch] = engine_freeze[sel_ch] == 0 and 1 or 0
-      engine.freeze(sel_ch - 1, engine_freeze[sel_ch])
+    if z == 1 then
+      if key1_held then
+        -- K1+K3: toggle bandmate
+        if mate.active then
+          mate:stop()
+        else
+          mate:start()
+        end
+      elseif page == 3 then
+        -- toggle freeze on selected channel
+        engine_freeze[sel_ch] = engine_freeze[sel_ch] == 0 and 1 or 0
+        engine.freeze(sel_ch - 1, engine_freeze[sel_ch])
+      end
     end
   end
   screen_dirty = true
@@ -373,6 +409,14 @@ function redraw()
   screen.level(playing and 15 or 5)
   screen.move(1, 7)
   screen.text("TESSERA")
+
+  -- bandmate phase indicator
+  if mate.active then
+    screen.level(12)
+    screen.move(55, 7)
+    screen.text(mate.phase)
+  end
+
   screen.level(8)
   screen.move(128, 7)
   screen.text_right(PAGE_NAMES[page])
@@ -633,5 +677,6 @@ end
 
 function cleanup()
   playing = false
+  mate:stop()
   all_notes_off()
 end
