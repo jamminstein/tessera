@@ -115,29 +115,29 @@ Engine_Tessera : CroneEngine {
       // analog: MoogFF ladder filter
       cutEnv = cutoff * (1 + (envFilt * envMod * 4) + (driftLfo1 * 0.03));
       cutEnv = cutEnv.clip(40, 18000);
-      resScaled = res.linlin(0, 1, 0, 2.5); // safe range, no self-oscillation
+      resScaled = res.linlin(0, 1, 0, 2.8);
       analogFilt = MoogFF.ar(sig, cutEnv, resScaled);
-      analogFilt = analogFilt.tanh; // catch resonance spikes cleanly
-      analogFilt = Pan2.ar(analogFilt * 2.0, pan + (driftLfo1 * 0.06));
+      analogFilt = (analogFilt * 3.0).tanh; // boost THEN limit — loud but safe
+      analogFilt = Pan2.ar(analogFilt, pan + (driftLfo1 * 0.06));
 
       // spectral: dual BPF peaks (QPAS-style)
-      peakLfo1 = LFNoise2.kr(0.13).range(-0.1, 0.1);
-      peakLfo2 = LFNoise2.kr(0.09).range(-0.1, 0.1);
+      peakLfo1 = LFNoise2.kr(0.13).range(-0.12, 0.12);
+      peakLfo2 = LFNoise2.kr(0.09).range(-0.12, 0.12);
       peak1Freq = peak1 * (1 + peakLfo1) * (2 ** (peakSpread * -0.5));
       peak2Freq = peak2 * (1 + peakLfo2) * (2 ** (peakSpread * 0.5));
-      cutEnv1 = peak1Freq * (1 + (envFilt * envMod * 3) + (driftLfo1 * 0.02));
-      cutEnv2 = peak2Freq * (1 + (envFilt * envMod * 2) + (driftLfo2 * 0.02));
+      cutEnv1 = peak1Freq * (1 + (envFilt * envMod * 3.5) + (driftLfo1 * 0.03));
+      cutEnv2 = peak2Freq * (1 + (envFilt * envMod * 2.5) + (driftLfo2 * 0.03));
       cutEnv1 = cutEnv1.clip(60, 16000);
       cutEnv2 = cutEnv2.clip(60, 16000);
-      resScaledBPF = res.linlin(0, 1, 0.6, 0.08); // min rq 0.08 not 0.03
-      filt1 = BPF.ar(sig, cutEnv1, resScaledBPF) * (1.5 + (res * 4)); // gentler boost
-      filt2 = BPF.ar(sig, cutEnv2, resScaledBPF) * (1.5 + (res * 4));
+      resScaledBPF = res.linlin(0, 1, 0.5, 0.06);
+      filt1 = BPF.ar(sig, cutEnv1, resScaledBPF) * (2 + (res * 7));
+      filt2 = BPF.ar(sig, cutEnv2, resScaledBPF) * (2 + (res * 7));
       stereoSpec = [
         (filt1 * 0.7) + (filt2 * 0.3),
         (filt1 * 0.3) + (filt2 * 0.7)
       ];
-      stereoSpec = stereoSpec.tanh; // single clean limiter
-      spectralFilt = Balance2.ar(stereoSpec[0], stereoSpec[1], pan + (driftLfo1 * 0.06)) * 1.8;
+      stereoSpec = (stereoSpec * 2.0).tanh; // boost THEN limit
+      spectralFilt = Balance2.ar(stereoSpec[0], stereoSpec[1], pan + (driftLfo1 * 0.06));
 
       // ── CROSSFADE FILTER OUTPUTS ──
       filtSig = (analogFilt * (1 - vm)) + (spectralFilt * vm);
