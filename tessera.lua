@@ -319,7 +319,7 @@ function init()
 
   -- explorer (autonomous bandmate)
   params:add_separator("EXPLORER")
-  params:add_option("explorer_active", "bandmate", {"off", "on"}, 2)
+  params:add_option("explorer_active", "bandmate", {"off", "on"}, 1)
   params:set_action("explorer_active", function(v) explorer.active = v == 2 end)
 
   params:add_control("explorer_intensity", "intensity",
