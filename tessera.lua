@@ -1,21 +1,18 @@
 -- tessera
--- algorithmic spectral mosaic
+-- algorithmic mosaic synth
 --
 -- multi repetitor rhythms
 -- ziggurat pitch chains
--- spectral resynthesis + FM
--- wavefolder + sub + noise
+-- 4-voice analog-style engine
 --
--- E1: page (rhythm/pitch/spectral/fx)
+-- E1: page (rhythm/pitch/voice/fx)
 -- E2: select channel or param
 -- E3: adjust value
 -- K2: play/stop
--- K3: hold + E3 for secondary param
---     tap on spectral page = freeze
+-- K3: hold for secondary
 --
 -- grid top 4 rows: rhythm steps
 -- grid bottom 4 rows: pitch chain
--- hold grid key + E3 = edit pitch
 
 engine.name = "Tessera"
 
@@ -33,7 +30,7 @@ local g = grid.connect()
 local midi_out = nil
 
 local playing = false
-local page = 1           -- 1=rhythm  2=pitch  3=spectral  4=fx
+local page = 1
 local NUM_PAGES = 4
 local sel_ch = 1
 local sel_param = 1
@@ -44,42 +41,41 @@ local grid_dirty = true
 local key3_held = false
 local grid_held = nil
 
-local engine_freeze = {0, 0, 0, 0}
 local active_notes = {{}, {}, {}, {}}
 
 local NOTE_NAMES = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"}
 local DIVISIONS = {1/4, 1/8, 1/16, 1/32}
 local DIV_NAMES = {"1/4", "1/8", "1/16", "1/32"}
-local WAVE_NAMES = {"sine", "saw", "pulse", "noise"}
-local FILTER_NAMES = {"lpf", "bpf", "hpf"}
 
-local SPECTRAL_PARAMS = {
-  "waveform", "partials", "tilt", "fold",
-  "fm_depth", "fm_ratio",
-  "sub_amp", "noise_amp",
-  "filter", "filter_q", "filter_type", "filter_env",
-  "decay", "release", "delay_send"
+-- voice params for E2/E3 editing on voice page
+local VOICE_PARAMS = {
+  "saw", "pulse", "sub", "noise",
+  "detune", "drive", "cutoff", "res",
+  "env_mod", "drift", "decay", "release",
+  "amp", "delay_send"
 }
 
--- channel character presets (applied at init)
+-- channel presets — each voice has real character
 local CH_PRESETS = {
-  -- ch1: crystalline lead — saw partials, light FM, some fold
-  {waveform=1, partials=10, tilt=0.3, fold=0.5, fm_depth=0.15, fm_ratio=2.0,
-   sub_amp=0, noise_amp=0, filter=6000, filter_q=0.3, filter_type=0,
-   filter_env=0.4, decay=0.5, release=0.4, amp=0.3, pan=-0.4},
-  -- ch2: thick bass — sine + sub, low filter
-  {waveform=0, partials=4, tilt=1.2, fold=0, fm_depth=0, fm_ratio=1,
-   sub_amp=0.6, noise_amp=0, filter=800, filter_q=0.5, filter_type=0,
-   filter_env=0.6, decay=0.3, release=0.2, amp=0.35, pan=0.1},
-  -- ch3: metallic perc — pulse, FM, heavy fold
-  {waveform=2, partials=6, tilt=0.1, fold=2.5, fm_depth=0.6, fm_ratio=1.414,
-   sub_amp=0, noise_amp=0.15, filter=3000, filter_q=0.2, filter_type=0,
-   filter_env=0.8, decay=0.15, release=0.1, amp=0.25, pan=0.5},
-  -- ch4: spectral wash — noise bands, shimmer
-  {waveform=3, partials=12, tilt=0.6, fold=0.3, fm_depth=0.1, fm_ratio=3.0,
-   sub_amp=0, noise_amp=0.3, filter=5000, filter_q=0.6, filter_type=1,
-   filter_env=0.2, decay=1.2, release=0.8, amp=0.2, pan=-0.3},
+  -- ch1: bright lead — dual saw, moderate filter, some drive
+  {saw=0.7, pulse=0.0, sub=0.0, noise=0.0,
+   detune=0.12, drive=0.4, cutoff=3500, res=0.25, env_mod=0.5,
+   drift=0.12, decay=0.4, release=0.3, amp=0.28, pan=-0.35, delay_send=0.3},
+  -- ch2: fat bass — sub + saw, low cutoff, high drive
+  {saw=0.3, pulse=0.0, sub=0.8, noise=0.0,
+   detune=0.05, drive=0.7, cutoff=600, res=0.4, env_mod=0.7,
+   drift=0.08, decay=0.25, release=0.15, amp=0.35, pan=0.0, delay_send=0.1},
+  -- ch3: percussive — pulse + noise, tight envelope, resonant
+  {saw=0.0, pulse=0.6, sub=0.0, noise=0.4,
+   detune=0.0, drive=0.5, cutoff=2000, res=0.55, env_mod=0.9,
+   drift=0.06, decay=0.1, release=0.08, amp=0.25, pan=0.4, delay_send=0.35},
+  -- ch4: pad wash — saw + noise, long decay, drifty
+  {saw=0.4, pulse=0.0, sub=0.2, noise=0.5,
+   detune=0.2, drive=0.2, cutoff=2500, res=0.15, env_mod=0.2,
+   drift=0.3, decay=1.5, release=1.0, amp=0.18, pan=-0.2, delay_send=0.45},
 }
+
+local CH_LABELS = {"LEAD", "BASS", "PERC", "WASH"}
 
 ----------------------------------------------------------------
 -- init
@@ -110,165 +106,113 @@ function init()
     zig:set_scale(params:get("root") - 1, v)
   end)
 
-  -- per-channel params
+  -- per-channel voice params
   for ch = 1, 4 do
     local pre = CH_PRESETS[ch]
-    params:add_separator("CH " .. ch)
+    params:add_separator("CH " .. ch .. " " .. CH_LABELS[ch])
 
-    params:add_option("ch" .. ch .. "_waveform", "waveform", WAVE_NAMES, pre.waveform + 1)
-    params:set_action("ch" .. ch .. "_waveform", function(v)
-      engine.waveform(ch - 1, v - 1)
-    end)
+    params:add_control("ch" .. ch .. "_saw", "saw",
+      controlspec.new(0, 1, 'lin', 0.01, pre.saw))
+    params:set_action("ch" .. ch .. "_saw", function(v) engine.saw(ch - 1, v) end)
 
-    params:add_number("ch" .. ch .. "_partials", "partials", 1, 16, pre.partials)
-    params:set_action("ch" .. ch .. "_partials", function(v)
-      engine.partials(ch - 1, v)
-    end)
+    params:add_control("ch" .. ch .. "_pulse", "pulse",
+      controlspec.new(0, 1, 'lin', 0.01, pre.pulse))
+    params:set_action("ch" .. ch .. "_pulse", function(v) engine.pulse(ch - 1, v) end)
 
-    params:add_control("ch" .. ch .. "_tilt", "tilt",
-      controlspec.new(0, 3, 'lin', 0.01, pre.tilt))
-    params:set_action("ch" .. ch .. "_tilt", function(v)
-      engine.tilt(ch - 1, v)
-    end)
+    params:add_control("ch" .. ch .. "_sub", "sub",
+      controlspec.new(0, 1, 'lin', 0.01, pre.sub))
+    params:set_action("ch" .. ch .. "_sub", function(v) engine.sub(ch - 1, v) end)
 
-    params:add_control("ch" .. ch .. "_fold", "wavefold",
-      controlspec.new(0, 5, 'lin', 0.01, pre.fold))
-    params:set_action("ch" .. ch .. "_fold", function(v)
-      engine.fold(ch - 1, v)
-    end)
+    params:add_control("ch" .. ch .. "_noise", "noise",
+      controlspec.new(0, 1, 'lin', 0.01, pre.noise))
+    params:set_action("ch" .. ch .. "_noise", function(v) engine.noise(ch - 1, v) end)
 
-    params:add_control("ch" .. ch .. "_fm_depth", "FM depth",
-      controlspec.new(0, 2, 'lin', 0.01, pre.fm_depth))
-    params:set_action("ch" .. ch .. "_fm_depth", function(v)
-      engine.fm_depth(ch - 1, v)
-    end)
+    params:add_control("ch" .. ch .. "_detune", "detune",
+      controlspec.new(0, 1, 'lin', 0.01, pre.detune))
+    params:set_action("ch" .. ch .. "_detune", function(v) engine.detune(ch - 1, v) end)
 
-    params:add_control("ch" .. ch .. "_fm_ratio", "FM ratio",
-      controlspec.new(0.25, 8, 'exp', 0.01, pre.fm_ratio))
-    params:set_action("ch" .. ch .. "_fm_ratio", function(v)
-      engine.fm_ratio(ch - 1, v)
-    end)
+    params:add_control("ch" .. ch .. "_drive", "drive",
+      controlspec.new(0, 2, 'lin', 0.01, pre.drive))
+    params:set_action("ch" .. ch .. "_drive", function(v) engine.drive(ch - 1, v) end)
 
-    params:add_control("ch" .. ch .. "_sub_amp", "sub amp",
-      controlspec.new(0, 1, 'lin', 0.01, pre.sub_amp))
-    params:set_action("ch" .. ch .. "_sub_amp", function(v)
-      engine.sub_amp(ch - 1, v)
-    end)
+    params:add_control("ch" .. ch .. "_cutoff", "cutoff",
+      controlspec.new(60, 12000, 'exp', 1, pre.cutoff, "hz"))
+    params:set_action("ch" .. ch .. "_cutoff", function(v) engine.cutoff(ch - 1, v) end)
 
-    params:add_control("ch" .. ch .. "_noise_amp", "noise amp",
-      controlspec.new(0, 1, 'lin', 0.01, pre.noise_amp))
-    params:set_action("ch" .. ch .. "_noise_amp", function(v)
-      engine.noise_amp(ch - 1, v)
-    end)
+    params:add_control("ch" .. ch .. "_res", "resonance",
+      controlspec.new(0, 0.95, 'lin', 0.01, pre.res))
+    params:set_action("ch" .. ch .. "_res", function(v) engine.res(ch - 1, v) end)
 
-    params:add_control("ch" .. ch .. "_spread", "spread",
-      controlspec.new(0, 0.1, 'lin', 0.001, 0.008))
-    params:set_action("ch" .. ch .. "_spread", function(v)
-      engine.spread(ch - 1, v)
-    end)
+    params:add_control("ch" .. ch .. "_env_mod", "env > cutoff",
+      controlspec.new(0, 1, 'lin', 0.01, pre.env_mod))
+    params:set_action("ch" .. ch .. "_env_mod", function(v) engine.env_mod(ch - 1, v) end)
 
-    params:add_control("ch" .. ch .. "_filter", "filter",
-      controlspec.new(100, 12000, 'exp', 1, pre.filter, "hz"))
-    params:set_action("ch" .. ch .. "_filter", function(v)
-      engine.filter_freq(ch - 1, v)
-    end)
-
-    params:add_control("ch" .. ch .. "_filter_q", "filter q",
-      controlspec.new(0.05, 1, 'lin', 0.01, pre.filter_q))
-    params:set_action("ch" .. ch .. "_filter_q", function(v)
-      engine.filter_q(ch - 1, v)
-    end)
-
-    params:add_option("ch" .. ch .. "_filter_type", "filter type", FILTER_NAMES, pre.filter_type + 1)
-    params:set_action("ch" .. ch .. "_filter_type", function(v)
-      engine.filter_type(ch - 1, v - 1)
-    end)
-
-    params:add_control("ch" .. ch .. "_filter_env", "filt env mod",
-      controlspec.new(-1, 1, 'lin', 0.01, pre.filter_env))
-    params:set_action("ch" .. ch .. "_filter_env", function(v)
-      engine.filter_env(ch - 1, v)
-    end)
-
-    params:add_control("ch" .. ch .. "_amp", "amp",
-      controlspec.new(0, 1, 'lin', 0.01, pre.amp))
-    params:set_action("ch" .. ch .. "_amp", function(v)
-      engine.amp(ch - 1, v)
-    end)
+    params:add_control("ch" .. ch .. "_drift", "drift",
+      controlspec.new(0, 1, 'lin', 0.01, pre.drift))
+    params:set_action("ch" .. ch .. "_drift", function(v) engine.drift(ch - 1, v) end)
 
     params:add_control("ch" .. ch .. "_decay", "decay",
       controlspec.new(0.01, 4, 'exp', 0.01, pre.decay, "s"))
-    params:set_action("ch" .. ch .. "_decay", function(v)
-      engine.dec(ch - 1, v)
-    end)
+    params:set_action("ch" .. ch .. "_decay", function(v) engine.dec(ch - 1, v) end)
 
     params:add_control("ch" .. ch .. "_release", "release",
       controlspec.new(0.01, 4, 'exp', 0.01, pre.release, "s"))
-    params:set_action("ch" .. ch .. "_release", function(v)
-      engine.rel(ch - 1, v)
-    end)
+    params:set_action("ch" .. ch .. "_release", function(v) engine.rel(ch - 1, v) end)
+
+    params:add_control("ch" .. ch .. "_amp", "amp",
+      controlspec.new(0, 1, 'lin', 0.01, pre.amp))
+    params:set_action("ch" .. ch .. "_amp", function(v) engine.amp(ch - 1, v) end)
 
     params:add_control("ch" .. ch .. "_delay_send", "delay send",
-      controlspec.new(0, 1, 'lin', 0.01, 0.25))
-    params:set_action("ch" .. ch .. "_delay_send", function(v)
-      engine.delay_send(ch - 1, v)
-    end)
+      controlspec.new(0, 1, 'lin', 0.01, pre.delay_send))
+    params:set_action("ch" .. ch .. "_delay_send", function(v) engine.delay_send(ch - 1, v) end)
 
     params:add_control("ch" .. ch .. "_pan", "pan",
       controlspec.new(-1, 1, 'lin', 0.01, pre.pan))
-    params:set_action("ch" .. ch .. "_pan", function(v)
-      engine.pan(ch - 1, v)
-    end)
+    params:set_action("ch" .. ch .. "_pan", function(v) engine.pan(ch - 1, v) end)
   end
 
   -- FX
   params:add_separator("FX")
 
   params:add_control("delay_time", "delay time",
-    controlspec.new(0.01, 2.0, 'exp', 0.01, 0.3, "s"))
+    controlspec.new(0.01, 2.0, 'exp', 0.01, 0.375, "s"))
   params:set_action("delay_time", function(v) engine.delay_time(v) end)
 
   params:add_control("delay_feedback", "delay fb",
-    controlspec.new(0, 0.95, 'lin', 0.01, 0.5))
+    controlspec.new(0, 0.9, 'lin', 0.01, 0.45))
   params:set_action("delay_feedback", function(v) engine.delay_feedback(v) end)
 
   params:add_control("delay_color", "delay color",
-    controlspec.new(200, 12000, 'exp', 1, 4000, "hz"))
+    controlspec.new(200, 12000, 'exp', 1, 3500, "hz"))
   params:set_action("delay_color", function(v) engine.delay_color(v) end)
 
   params:add_control("delay_mix", "delay mix",
-    controlspec.new(0, 1, 'lin', 0.01, 0.35))
+    controlspec.new(0, 1, 'lin', 0.01, 0.3))
   params:set_action("delay_mix", function(v) engine.delay_mix(v) end)
 
   params:add_control("halo", "halo",
-    controlspec.new(0, 1, 'lin', 0.01, 0.3))
+    controlspec.new(0, 1, 'lin', 0.01, 0.25))
   params:set_action("halo", function(v) engine.halo(v) end)
 
   params:add_control("reverb_mix", "reverb mix",
-    controlspec.new(0, 1, 'lin', 0.01, 0.25))
+    controlspec.new(0, 1, 'lin', 0.01, 0.2))
   params:set_action("reverb_mix", function(v) engine.reverb_mix(v) end)
 
   params:add_control("reverb_size", "reverb size",
-    controlspec.new(0, 1, 'lin', 0.01, 0.85))
+    controlspec.new(0, 1, 'lin', 0.01, 0.8))
   params:set_action("reverb_size", function(v) engine.reverb_size(v) end)
-
-  params:add_control("shimmer", "shimmer",
-    controlspec.new(0, 1, 'lin', 0.01, 0.15))
-  params:set_action("shimmer", function(v) engine.shimmer(v) end)
 
   -- MIDI
   params:add_separator("MIDI")
   params:add_number("midi_device", "midi device", 1, 4, 1)
-  params:set_action("midi_device", function(v)
-    midi_out = midi.connect(v)
-  end)
+  params:set_action("midi_device", function(v) midi_out = midi.connect(v) end)
   for ch = 1, 4 do
     params:add_number("midi_ch_" .. ch, "ch " .. ch .. " midi ch", 1, 16, ch)
   end
   params:add_option("midi_enabled", "midi out", {"off", "on"}, 1)
 
   midi_out = midi.connect(params:get("midi_device"))
-
   params:bang()
 
   clock.run(step_clock)
@@ -276,14 +220,8 @@ function init()
   clock.run(function()
     while true do
       clock.sleep(1/15)
-      if screen_dirty then
-        redraw()
-        screen_dirty = false
-      end
-      if grid_dirty then
-        grid_redraw()
-        grid_dirty = false
-      end
+      if screen_dirty then redraw(); screen_dirty = false end
+      if grid_dirty then grid_redraw(); grid_dirty = false end
     end
   end)
 end
@@ -326,23 +264,21 @@ function step_clock()
 end
 
 ----------------------------------------------------------------
--- input: encoders
+-- encoders
 ----------------------------------------------------------------
 
 function enc(n, d)
   if n == 1 then
     page = util.clamp(page + d, 1, NUM_PAGES)
     sel_param = 1
-
   elseif n == 2 then
     if page == 3 then
-      sel_param = util.clamp(sel_param + d, 1, #SPECTRAL_PARAMS)
+      sel_param = util.clamp(sel_param + d, 1, #VOICE_PARAMS)
     elseif page == 4 then
-      sel_param = util.clamp(sel_param + d, 1, 8) -- 8 FX params
+      sel_param = util.clamp(sel_param + d, 1, 7)
     else
       sel_ch = util.clamp(sel_ch + d, 1, 4)
     end
-
   elseif n == 3 then
     if grid_held then
       local c = zig.channels[grid_held.ch]
@@ -350,17 +286,12 @@ function enc(n, d)
       local new = util.clamp(cur + d, c.range_lo, c.range_hi)
       new = zig:quantize(new)
       c.chain[grid_held.step] = new
-    elseif page == 1 then
-      enc_rhythm(d)
-    elseif page == 2 then
-      enc_pitch(d)
-    elseif page == 3 then
-      enc_spectral(d)
-    elseif page == 4 then
-      enc_fx(d)
+    elseif page == 1 then enc_rhythm(d)
+    elseif page == 2 then enc_pitch(d)
+    elseif page == 3 then enc_voice(d)
+    elseif page == 4 then enc_fx(d)
     end
   end
-
   screen_dirty = true
   grid_dirty = true
 end
@@ -388,26 +319,22 @@ function enc_pitch(d)
   end
 end
 
-function enc_spectral(d)
-  local pname = SPECTRAL_PARAMS[sel_param]
+function enc_voice(d)
+  local pname = VOICE_PARAMS[sel_param]
   local pkey = "ch" .. sel_ch .. "_" .. pname
-  if params.lookup[pkey] then
-    params:delta(pkey, d)
-  end
+  if params.lookup[pkey] then params:delta(pkey, d) end
 end
 
 local FX_PARAMS = {"delay_time", "delay_feedback", "delay_color", "delay_mix",
-                    "halo", "reverb_mix", "reverb_size", "shimmer"}
+                    "halo", "reverb_mix", "reverb_size"}
 
 function enc_fx(d)
   local pkey = FX_PARAMS[sel_param]
-  if pkey and params.lookup[pkey] then
-    params:delta(pkey, d)
-  end
+  if pkey and params.lookup[pkey] then params:delta(pkey, d) end
 end
 
 ----------------------------------------------------------------
--- input: keys
+-- keys
 ----------------------------------------------------------------
 
 function key(n, z)
@@ -420,13 +347,8 @@ function key(n, z)
     else
       playing = true
     end
-
   elseif n == 3 then
     key3_held = z == 1
-    if z == 1 and page == 3 then
-      engine_freeze[sel_ch] = engine_freeze[sel_ch] == 0 and 1 or 0
-      engine.freeze(sel_ch - 1, engine_freeze[sel_ch])
-    end
   end
   screen_dirty = true
 end
@@ -448,8 +370,7 @@ end
 -- screen
 ----------------------------------------------------------------
 
-local PAGE_NAMES = {"RHYTHM", "PITCH", "SPECTRAL", "FX"}
-local CH_LABELS = {"CRYST", "BASS", "METAL", "WASH"}
+local PAGE_NAMES = {"RHYTHM", "PITCH", "VOICE", "FX"}
 
 function redraw()
   screen.clear()
@@ -465,14 +386,12 @@ function redraw()
   screen.move(128, 7)
   screen.text_right(PAGE_NAMES[page])
 
-  -- page dots
   for i = 1, NUM_PAGES do
     screen.level(i == page and 15 or 3)
     screen.rect(55 + (i-1)*5, 3, 3, 3)
     screen.fill()
   end
 
-  -- divider
   screen.level(2)
   screen.move(1, 9)
   screen.line(128, 9)
@@ -480,11 +399,10 @@ function redraw()
 
   if page == 1 then draw_rhythm()
   elseif page == 2 then draw_pitch()
-  elseif page == 3 then draw_spectral()
+  elseif page == 3 then draw_voice()
   elseif page == 4 then draw_fx()
   end
 
-  -- footer
   screen.level(3)
   screen.move(128, 63)
   screen.text_right(params:string("bpm"))
@@ -511,12 +429,10 @@ function draw_rhythm()
         screen.level(is_play and 15 or (is_sel and 10 or 5))
         screen.rect(x, y + 1, w - 1, 6)
         screen.fill()
-      else
-        if is_play then
-          screen.level(4)
-          screen.rect(x, y + 1, w - 1, 6)
-          screen.fill()
-        end
+      elseif is_play then
+        screen.level(4)
+        screen.rect(x, y + 1, w - 1, 6)
+        screen.fill()
       end
     end
 
@@ -546,18 +462,11 @@ function draw_pitch()
     for i = 1, c.chain_len do
       local note = c.chain[i] or 60
       local name = musicutil.note_num_to_name(note, true)
-      if i == c.position and playing then
-        screen.level(15)
-      else
-        screen.level(is_sel and 7 or 3)
-      end
+      screen.level((i == c.position and playing) and 15 or (is_sel and 7 or 3))
       screen.move(x, y + 7)
       screen.text(name)
       x = x + screen.text_extents(name) + 2
-      if x > 95 then
-        screen.text("..")
-        break
-      end
+      if x > 95 then screen.text(".."); break end
     end
 
     screen.level(is_sel and 10 or 4)
@@ -566,68 +475,58 @@ function draw_pitch()
   end
 end
 
-function draw_spectral()
-  -- show selected channel label
+function draw_voice()
   screen.level(12)
   screen.move(50, 7)
   screen.text_right("CH" .. sel_ch .. " " .. CH_LABELS[sel_ch])
 
-  for ch = 1, 4 do
-    local y = 12 + (ch - 1) * 11
-    local is_sel = ch == sel_ch
+  -- mixer bars for osc levels
+  local bar_y = 14
+  local sources = {"saw", "pulse", "sub", "noise"}
+  for i, src in ipairs(sources) do
+    local v = params:get("ch" .. sel_ch .. "_" .. src)
+    local x = 2 + (i - 1) * 32
+    local is_sel = sel_param == i
 
-    screen.level(is_sel and 15 or 4)
-    screen.move(1, y + 7)
-    screen.text(ch)
+    screen.level(is_sel and 15 or 6)
+    screen.move(x, bar_y + 7)
+    screen.text(src:sub(1, 3))
 
-    -- waveform indicator
-    local wf = params:get("ch" .. ch .. "_waveform")
-    screen.level(is_sel and 10 or 4)
-    screen.move(8, y + 7)
-    screen.text(string.sub(WAVE_NAMES[wf], 1, 3))
-
-    -- partial bars with fold brightness
-    local np = params:get("ch" .. ch .. "_partials")
-    local tilt = params:get("ch" .. ch .. "_tilt")
-    local fld = params:get("ch" .. ch .. "_fold")
-    for i = 1, 16 do
-      local h = 0
-      if i <= np then
-        h = math.floor(8 / (i ^ (tilt * 0.4)))
-        h = math.max(h, 1)
-      end
-      if h > 0 then
-        local x = 26 + (i - 1) * 4
-        local bright = is_sel and (engine_freeze[ch] == 1 and 15 or 8) or 3
-        if fld > 0.5 then bright = math.min(bright + 3, 15) end
-        screen.level(bright)
-        screen.rect(x, y + 9 - h, 3, h)
-        screen.fill()
-      end
-    end
-
-    -- freeze indicator
-    if engine_freeze[ch] == 1 then
-      screen.level(15)
-      screen.move(95, y + 7)
-      screen.text("FRZ")
-    end
-
-    -- filter type
-    local ft = params:get("ch" .. ch .. "_filter_type")
-    screen.level(is_sel and 6 or 2)
-    screen.move(112, y + 7)
-    screen.text_right(FILTER_NAMES[ft])
+    -- bar
+    local bw = math.floor(v * 24)
+    screen.level(is_sel and 12 or 5)
+    screen.rect(x, bar_y + 9, bw, 3)
+    screen.fill()
+    screen.level(2)
+    screen.rect(x, bar_y + 9, 24, 3)
+    screen.stroke()
   end
 
-  -- selected param
+  -- filter viz
+  local cut = params:get("ch" .. sel_ch .. "_cutoff")
+  local r = params:get("ch" .. sel_ch .. "_res")
+  local cut_x = util.linlin(60, 12000, 4, 124, math.log(cut))
+  screen.level(8)
+  screen.move(4, 42)
+  for x = 4, 124 do
+    local f = util.linexp(4, 124, 60, 12000, x)
+    local gain = 1 / (1 + ((f / cut) ^ 4))
+    if math.abs(f - cut) < cut * 0.15 then
+      gain = gain * (1 + r * 3)
+    end
+    local y = 42 - math.floor(gain * 12)
+    screen.line(x, y)
+  end
+  screen.level(6)
+  screen.stroke()
+
+  -- selected param readout
   screen.level(10)
   screen.move(1, 60)
-  local pname = SPECTRAL_PARAMS[sel_param]
-  screen.text(pname .. ": ")
+  local pname = VOICE_PARAMS[sel_param]
   local pkey = "ch" .. sel_ch .. "_" .. pname
   if params.lookup[pkey] then
-    screen.text(params:string(pkey))
+    screen.text(pname:gsub("_", " ") .. ": " .. params:string(pkey))
   end
 end
 
@@ -636,11 +535,11 @@ function draw_fx()
   for i, pkey in ipairs(FX_PARAMS) do
     local is_sel = i == sel_param
     screen.level(is_sel and 15 or 5)
-    screen.move(3, y + (i - 1) * 6)
+    screen.move(3, y + (i - 1) * 7)
     screen.text(pkey:gsub("_", " "))
 
     screen.level(is_sel and 12 or 4)
-    screen.move(126, y + (i - 1) * 6)
+    screen.move(126, y + (i - 1) * 7)
     screen.text_right(params:string(pkey))
   end
 end
@@ -662,37 +561,28 @@ g.key = function(x, y, z)
           c.accents[x] = 0
         end
       end
-      sel_ch = ch
-      page = 1
+      sel_ch = ch; page = 1
     end
-
   elseif y >= 5 and y <= 8 then
     local ch = y - 4
     local c = zig.channels[ch]
     if z == 1 then
       if x >= 1 and x <= c.chain_len then
         grid_held = {ch = ch, step = x}
-        sel_ch = ch
-        page = 2
+        sel_ch = ch; page = 2
       elseif x == c.chain_len + 1 and c.chain_len < 16 then
         zig:set_chain_length(ch, c.chain_len + 1)
-        sel_ch = ch
-        page = 2
+        sel_ch = ch; page = 2
       end
     else
-      if grid_held and grid_held.ch == ch then
-        grid_held = nil
-      end
+      if grid_held and grid_held.ch == ch then grid_held = nil end
     end
   end
-
-  screen_dirty = true
-  grid_dirty = true
+  screen_dirty = true; grid_dirty = true
 end
 
 function grid_redraw()
   g:all(0)
-
   for ch = 1, 4 do
     local c = rep.channels[ch]
     for x = 1, math.min(c.steps, 16) do
@@ -706,26 +596,20 @@ function grid_redraw()
       g:led(x, ch, bright)
     end
   end
-
   for ch = 1, 4 do
     local c = zig.channels[ch]
     for x = 1, math.min(c.chain_len, 16) do
       local bright = 4
-      if x == c.position and playing then
-        bright = 15
-      elseif grid_held and grid_held.ch == ch and grid_held.step == x then
-        bright = 12
+      if x == c.position and playing then bright = 15
+      elseif grid_held and grid_held.ch == ch and grid_held.step == x then bright = 12
       else
         local note = c.chain[x] or 60
         bright = math.floor(util.linlin(24, 96, 3, 10, note))
       end
       g:led(x, ch + 4, bright)
     end
-    if c.chain_len < 16 then
-      g:led(c.chain_len + 1, ch + 4, 2)
-    end
+    if c.chain_len < 16 then g:led(c.chain_len + 1, ch + 4, 2) end
   end
-
   g:refresh()
 end
 

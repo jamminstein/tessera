@@ -1,6 +1,9 @@
-// Engine_Tessera
-// 4 voices: selectable waveform, FM, wavefolder, sub, noise, dual filter
-// Global: spectral delay w/ halo, shimmer reverb
+// Engine_Tessera v3
+// 4 voices — each: 2 osc + sub + noise, MoogFF ladder, tanh saturation
+// Global: tape delay w/ diffusion, plate reverb
+//
+// Design: fewer oscillators, better gain staging, musical saturation,
+// internal modulation for life. Sounds like hardware, not a spreadsheet.
 
 Engine_Tessera : CroneEngine {
   var voices;
@@ -15,111 +18,129 @@ Engine_Tessera : CroneEngine {
     delayBus = Bus.audio(context.server, 2);
     reverbBus = Bus.audio(context.server, 2);
 
+    // ── VOICE ────────────────────────────────────
+    // 2 oscillators (saw+pulse) mixed, sub sine, filtered noise
+    // -> tanh saturation -> MoogFF ladder -> VCA
+    // internal drift LFOs for life
     SynthDef(\tessera_voice, {
       arg out=0, delayOut=0,
           freq=220, amp=0.3, t_gate=0, accent=1,
-          atk=0.003, dec=0.4, sus=0.0, rel=0.3,
-          waveform=0, partials=8, tilt=0.5, spread=0.008,
-          fmDepth=0, fmRatio=1.5,
-          fold=0, subAmp=0, subOct=1,
-          noiseAmp=0, noiseBW=200,
-          filterFreq=2000, filterQ=0.4,
-          filterType=0, filterEnv=0,
-          freeze=0, smearRate=0.5,
-          slewTime=0.05, pan=0, delaySend=0.3;
+          // envelope
+          atk=0.005, dec=0.5, rel=0.3,
+          // oscillator mix: saw, pulse, sub, noise (0-1 each)
+          sawLvl=0.5, pulseLvl=0.0, subLvl=0.0, noiseLvl=0.0,
+          // timbre
+          detune=0.08, pulseWidth=0.5,
+          drive=0.3,        // pre-filter saturation 0-2
+          // filter
+          cutoff=2400, res=0.3, envMod=0.4,
+          // modulation
+          drift=0.15,       // slow pitch/filter drift amount
+          slewTime=0.05,
+          pan=0, delaySend=0.25;
 
-      var sig, env, envFilter, portFreq, sub, noise, fFreq, q;
+      var sig, osc1, osc2, sub, noise, env, envFilt, portFreq;
+      var driftLfo1, driftLfo2, cutMod;
 
       portFreq = Lag.kr(freq, slewTime);
 
+      // slow internal drift — this is what makes it breathe
+      driftLfo1 = LFNoise2.kr(0.3) * drift;
+      driftLfo2 = LFNoise2.kr(0.37) * drift;
+
+      // perc envelope with accent
       env = EnvGen.kr(
-        Env.new([0, 1, sus.max(0.001), 0], [atk, dec, rel], [\lin, -3, -4]),
+        Env.perc(atk, dec + rel),
         t_gate
       ) * accent;
 
-      envFilter = EnvGen.kr(
-        Env.new([0, 1, 0.3, 0], [atk, dec * 0.5, rel], [\lin, -2, -4]),
+      // filter envelope (faster attack, independent shape)
+      envFilt = EnvGen.kr(
+        Env.perc(atk * 0.5, dec * 0.6),
         t_gate
       );
 
-      sig = Mix.fill(16, { arg i;
-        var n, pFreq, pAmp, drift, fmMod, osc;
-        n = i + 1;
-        pFreq = portFreq * n;
-        pAmp = (1 / (n ** (1 + tilt.max(0)))) * (n <= partials);
-        drift = LFNoise1.kr(smearRate + (i * 0.07)) * spread * pFreq;
-        drift = drift * (1 - freeze);
-        fmMod = SinOsc.ar(pFreq * fmRatio) * fmDepth * pFreq;
-        osc = Select.ar(waveform, [
-          SinOsc.ar(pFreq + drift + fmMod),
-          LFSaw.ar(pFreq + drift + fmMod),
-          Pulse.ar(pFreq + drift + fmMod, 0.5 - (i * 0.02).clip(0, 0.4)),
-          BPF.ar(WhiteNoise.ar, (pFreq + drift).max(20), 0.02) * 20
-        ]);
-        osc * pAmp;
-      });
+      // ── oscillators ────────────────────────────
+      // two detuned saws — classic thick analog sound
+      osc1 = Saw.ar(portFreq * (1 + (detune * 0.01) + (driftLfo1 * 0.002)));
+      osc2 = Saw.ar(portFreq * (1 - (detune * 0.01) + (driftLfo2 * 0.002)));
 
-      // wavefolder
-      sig = Select.ar(fold > 0.01, [
-        sig,
-        (sig * (1 + (fold * 4))).fold2(1) * (1 / (1 + fold))
-      ]);
+      // pulse with width modulation from drift
+      sub = Pulse.ar(portFreq, (pulseWidth + (driftLfo1 * 0.05)).clip(0.05, 0.95));
 
-      // sub oscillator
-      sub = SinOsc.ar(portFreq / (2 ** subOct)) * subAmp;
-      sig = sig + sub;
+      // sub: pure sine one octave down
+      noise = SinOsc.ar(portFreq * 0.5);
 
-      // noise band layer
-      noise = BPF.ar(PinkNoise.ar, portFreq.max(20), noiseBW / portFreq.max(20)) * noiseAmp * 8;
-      sig = sig + noise;
+      // mix — each level 0-1
+      sig = (osc1 * sawLvl * 0.4) + (osc2 * sawLvl * 0.4)
+          + (sub * pulseLvl * 0.5)
+          + (noise * subLvl * 0.6)
+          + (BPF.ar(PinkNoise.ar, portFreq.max(40), 0.3) * noiseLvl * 2);
 
-      // filter with envelope mod
-      fFreq = (filterFreq * (1 + (envFilter * filterEnv * 4))).clip(20, 18000);
-      q = filterQ.clip(0.05, 1);
-      sig = Select.ar(filterType, [
-        RLPF.ar(sig, fFreq, q),
-        BPF.ar(sig, fFreq, q) * 3,
-        RHPF.ar(sig, fFreq, q)
-      ]);
+      // ── saturation (pre-filter, like driving a Moog input) ──
+      sig = (sig * (1 + (drive * 3))).tanh * (1 / (1 + drive));
 
-      sig = sig * 2.5;
+      // ── MoogFF ladder filter ───────────────────
+      // cutoff modulated by envelope + drift
+      cutMod = cutoff * (1 + (envFilt * envMod * 3) + (driftLfo2 * 0.03));
+      cutMod = cutMod.clip(30, 18000);
+      sig = MoogFF.ar(sig, cutMod, res.linlin(0, 1, 0, 3.8));
+
+      // ── output ─────────────────────────────────
       sig = sig * env * amp;
-      sig = Pan2.ar(sig, pan);
+      sig = Pan2.ar(sig, pan + (driftLfo1 * 0.05));
 
       Out.ar(out, sig);
       Out.ar(delayOut, sig * delaySend);
     }).add;
 
+    // ── TAPE DELAY (Mimeophon-inspired) ──────────
+    // Saturated feedback, filtered, with allpass diffusion "halo"
     SynthDef(\tessera_delay, {
       arg in=0, out=0,
-          time=0.3, feedback=0.5, color=4000,
-          mix=0.4, halo=0.3;
+          time=0.375, feedback=0.45, color=3500,
+          mix=0.3, halo=0.25;
       var sig, delayed, haloSig;
+
       sig = In.ar(in, 2);
-      delayed = CombL.ar(sig, 2.0, time.clip(0.01, 2.0), feedback * 6);
-      delayed = delayed.tanh;
-      delayed = LPF.ar(delayed, color.clip(200, 16000));
+
+      // feedback with tape-style saturation
+      delayed = CombL.ar(sig, 2.0, time.clip(0.01, 2.0), feedback * 5);
+      delayed = (delayed * 1.2).tanh * 0.85;  // tape saturation
+      delayed = LPF.ar(delayed, color.clip(200, 12000));
+      delayed = HPF.ar(delayed, 80);  // remove mud
+
+      // halo: diffused allpass cloud (Mimeophon's magic)
       haloSig = delayed;
       4.do { arg i;
-        haloSig = AllpassL.ar(haloSig, 0.5,
-          LFNoise1.kr(0.05 + (i * 0.02)).range(0.02, 0.07 + (i * 0.02)),
-          halo * 3);
+        haloSig = AllpassC.ar(haloSig, 0.15,
+          LFNoise1.kr(0.1 + (i * 0.04)).range(0.01, 0.05 + (i * 0.015)),
+          halo * 2.5);
       };
+
       Out.ar(out, haloSig * mix);
     }).add;
 
+    // ── REVERB (plate-style, bright but not muddy) ──
     SynthDef(\tessera_reverb, {
-      arg in=0, out=0, mix=0.3, size=0.85, damp=0.5, shimmer=0;
-      var sig, wet, shim;
+      arg in=0, out=0, mix=0.2, size=0.8, damp=0.4;
+      var sig, dry, wet;
+
       sig = In.ar(in, 2);
-      wet = FreeVerb2.ar(sig[0], sig[1], mix, size, damp);
-      shim = PitchShift.ar(wet, 0.2, 2.0, 0.01, 0.05) * shimmer * 0.3;
-      wet = wet + shim;
-      Out.ar(out, wet);
+      dry = sig;
+
+      // pre-delay for clarity
+      wet = DelayN.ar(sig, 0.05, 0.02);
+      wet = FreeVerb2.ar(wet[0], wet[1], 1, size, damp);
+      wet = HPF.ar(wet, 120);  // keep reverb clean
+      wet = LPF.ar(wet, 8000); // not too bright
+
+      Out.ar(out, dry + (wet * mix));
     }).add;
 
     context.server.sync;
 
+    // ── instantiate voices ───────────────────────
     voices = Array.fill(4, {
       Synth(\tessera_voice, [
         \out, reverbBus, \delayOut, delayBus
@@ -134,35 +155,30 @@ Engine_Tessera : CroneEngine {
       \in, reverbBus, \out, context.out_b
     ]);
 
-    this.addCommand("hz",          "if", { |msg| voices[msg[1].asInteger].set(\freq, msg[2]) });
-    this.addCommand("amp",         "if", { |msg| voices[msg[1].asInteger].set(\amp, msg[2]) });
-    this.addCommand("gate",        "ii", { |msg| voices[msg[1].asInteger].set(\t_gate, msg[2]) });
-    this.addCommand("atk",         "if", { |msg| voices[msg[1].asInteger].set(\atk, msg[2]) });
-    this.addCommand("dec",         "if", { |msg| voices[msg[1].asInteger].set(\dec, msg[2]) });
-    this.addCommand("sus",         "if", { |msg| voices[msg[1].asInteger].set(\sus, msg[2]) });
-    this.addCommand("rel",         "if", { |msg| voices[msg[1].asInteger].set(\rel, msg[2]) });
-    this.addCommand("waveform",    "if", { |msg| voices[msg[1].asInteger].set(\waveform, msg[2]) });
-    this.addCommand("partials",    "if", { |msg| voices[msg[1].asInteger].set(\partials, msg[2]) });
-    this.addCommand("tilt",        "if", { |msg| voices[msg[1].asInteger].set(\tilt, msg[2]) });
-    this.addCommand("spread",      "if", { |msg| voices[msg[1].asInteger].set(\spread, msg[2]) });
-    this.addCommand("fm_depth",    "if", { |msg| voices[msg[1].asInteger].set(\fmDepth, msg[2]) });
-    this.addCommand("fm_ratio",    "if", { |msg| voices[msg[1].asInteger].set(\fmRatio, msg[2]) });
-    this.addCommand("fold",        "if", { |msg| voices[msg[1].asInteger].set(\fold, msg[2]) });
-    this.addCommand("sub_amp",     "if", { |msg| voices[msg[1].asInteger].set(\subAmp, msg[2]) });
-    this.addCommand("sub_oct",     "if", { |msg| voices[msg[1].asInteger].set(\subOct, msg[2]) });
-    this.addCommand("noise_amp",   "if", { |msg| voices[msg[1].asInteger].set(\noiseAmp, msg[2]) });
-    this.addCommand("noise_bw",    "if", { |msg| voices[msg[1].asInteger].set(\noiseBW, msg[2]) });
-    this.addCommand("filter_freq", "if", { |msg| voices[msg[1].asInteger].set(\filterFreq, msg[2]) });
-    this.addCommand("filter_q",    "if", { |msg| voices[msg[1].asInteger].set(\filterQ, msg[2]) });
-    this.addCommand("filter_type", "if", { |msg| voices[msg[1].asInteger].set(\filterType, msg[2]) });
-    this.addCommand("filter_env",  "if", { |msg| voices[msg[1].asInteger].set(\filterEnv, msg[2]) });
-    this.addCommand("delay_send",  "if", { |msg| voices[msg[1].asInteger].set(\delaySend, msg[2]) });
-    this.addCommand("slew",        "if", { |msg| voices[msg[1].asInteger].set(\slewTime, msg[2]) });
-    this.addCommand("freeze",      "if", { |msg| voices[msg[1].asInteger].set(\freeze, msg[2]) });
-    this.addCommand("smear",       "if", { |msg| voices[msg[1].asInteger].set(\smearRate, msg[2]) });
-    this.addCommand("pan",         "if", { |msg| voices[msg[1].asInteger].set(\pan, msg[2]) });
-    this.addCommand("accent",      "if", { |msg| voices[msg[1].asInteger].set(\accent, msg[2]) });
+    // ── voice commands ───────────────────────────
+    this.addCommand("hz",       "if", { |msg| voices[msg[1].asInteger].set(\freq, msg[2]) });
+    this.addCommand("amp",      "if", { |msg| voices[msg[1].asInteger].set(\amp, msg[2]) });
+    this.addCommand("gate",     "ii", { |msg| voices[msg[1].asInteger].set(\t_gate, msg[2]) });
+    this.addCommand("atk",      "if", { |msg| voices[msg[1].asInteger].set(\atk, msg[2]) });
+    this.addCommand("dec",      "if", { |msg| voices[msg[1].asInteger].set(\dec, msg[2]) });
+    this.addCommand("rel",      "if", { |msg| voices[msg[1].asInteger].set(\rel, msg[2]) });
+    this.addCommand("saw",      "if", { |msg| voices[msg[1].asInteger].set(\sawLvl, msg[2]) });
+    this.addCommand("pulse",    "if", { |msg| voices[msg[1].asInteger].set(\pulseLvl, msg[2]) });
+    this.addCommand("sub",      "if", { |msg| voices[msg[1].asInteger].set(\subLvl, msg[2]) });
+    this.addCommand("noise",    "if", { |msg| voices[msg[1].asInteger].set(\noiseLvl, msg[2]) });
+    this.addCommand("detune",   "if", { |msg| voices[msg[1].asInteger].set(\detune, msg[2]) });
+    this.addCommand("pw",       "if", { |msg| voices[msg[1].asInteger].set(\pulseWidth, msg[2]) });
+    this.addCommand("drive",    "if", { |msg| voices[msg[1].asInteger].set(\drive, msg[2]) });
+    this.addCommand("cutoff",   "if", { |msg| voices[msg[1].asInteger].set(\cutoff, msg[2]) });
+    this.addCommand("res",      "if", { |msg| voices[msg[1].asInteger].set(\res, msg[2]) });
+    this.addCommand("env_mod",  "if", { |msg| voices[msg[1].asInteger].set(\envMod, msg[2]) });
+    this.addCommand("drift",    "if", { |msg| voices[msg[1].asInteger].set(\drift, msg[2]) });
+    this.addCommand("slew",     "if", { |msg| voices[msg[1].asInteger].set(\slewTime, msg[2]) });
+    this.addCommand("pan",      "if", { |msg| voices[msg[1].asInteger].set(\pan, msg[2]) });
+    this.addCommand("delay_send", "if", { |msg| voices[msg[1].asInteger].set(\delaySend, msg[2]) });
+    this.addCommand("accent",   "if", { |msg| voices[msg[1].asInteger].set(\accent, msg[2]) });
 
+    // ── FX commands ──────────────────────────────
     this.addCommand("delay_time",     "f", { |msg| delaySynth.set(\time, msg[1]) });
     this.addCommand("delay_feedback", "f", { |msg| delaySynth.set(\feedback, msg[1]) });
     this.addCommand("delay_color",    "f", { |msg| delaySynth.set(\color, msg[1]) });
@@ -171,7 +187,6 @@ Engine_Tessera : CroneEngine {
     this.addCommand("reverb_mix",     "f", { |msg| reverbSynth.set(\mix, msg[1]) });
     this.addCommand("reverb_size",    "f", { |msg| reverbSynth.set(\size, msg[1]) });
     this.addCommand("reverb_damp",    "f", { |msg| reverbSynth.set(\damp, msg[1]) });
-    this.addCommand("shimmer",        "f", { |msg| reverbSynth.set(\shimmer, msg[1]) });
   }
 
   free {
