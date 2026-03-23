@@ -237,14 +237,7 @@ function Repetitor:advance(ch)
   end
 
   c.position = (c.position % c.steps) + 1
-  -- ghost notes when muted: advance position, trigger quietly on pattern hits
-  if c.muted then
-    if c.pattern[c.position] == 1 then
-      return true, 0.05, 1
-    else
-      return false, 0, 0
-    end
-  end
+  if c.muted then return false, 0, 0 end
 
   local hit = c.pattern[c.position] == 1
   if not hit then return false, 0, 0 end

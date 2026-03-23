@@ -195,19 +195,9 @@ function Explorer:mutate_pitch()
 end
 
 function Explorer:apply_phase()
-  -- phases create macro-structure: sparse → building → full → breaking
-  -- kick (ch2) NEVER muted — the beat must go on
-  local mute_map = {
-    {false, false, true,  true },  -- sparse: acid + kick
-    {false, false, false, false},  -- building: all channels
-    {false, false, false, false},  -- full: all channels
-    {false, false, true,  false},  -- breaking: drop noise, keep texture
-  }
-
-  local mutes = mute_map[self.phase]
-  for ch = 1, 4 do
-    self.rep.channels[ch].muted = mutes[ch]
-  end
+  -- phases create macro-structure via amp/filter changes, NEVER muting
+  -- all channels always play — variation comes from dynamics not silence
+  -- nothing to do here anymore — explorer mutates params instead
 end
 
 function Explorer:get_phase_name()
