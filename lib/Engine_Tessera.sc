@@ -115,28 +115,29 @@ Engine_Tessera : CroneEngine {
       // analog: MoogFF ladder filter
       cutEnv = cutoff * (1 + (envFilt * envMod * 4) + (driftLfo1 * 0.03));
       cutEnv = cutEnv.clip(40, 18000);
-      resScaled = res.linlin(0, 1, 0, 3.5);
+      resScaled = res.linlin(0, 1, 0, 2.5); // safe range, no self-oscillation
       analogFilt = MoogFF.ar(sig, cutEnv, resScaled);
-      analogFilt = Pan2.ar(analogFilt * 2.5, pan + (driftLfo1 * 0.06));
+      analogFilt = analogFilt.tanh; // catch resonance spikes cleanly
+      analogFilt = Pan2.ar(analogFilt * 2.0, pan + (driftLfo1 * 0.06));
 
       // spectral: dual BPF peaks (QPAS-style)
-      peakLfo1 = LFNoise2.kr(0.13).range(-0.15, 0.15);
-      peakLfo2 = LFNoise2.kr(0.09).range(-0.15, 0.15);
+      peakLfo1 = LFNoise2.kr(0.13).range(-0.1, 0.1);
+      peakLfo2 = LFNoise2.kr(0.09).range(-0.1, 0.1);
       peak1Freq = peak1 * (1 + peakLfo1) * (2 ** (peakSpread * -0.5));
       peak2Freq = peak2 * (1 + peakLfo2) * (2 ** (peakSpread * 0.5));
-      cutEnv1 = peak1Freq * (1 + (envFilt * envMod * 4) + (driftLfo1 * 0.03));
-      cutEnv2 = peak2Freq * (1 + (envFilt * envMod * 3) + (driftLfo2 * 0.03));
-      cutEnv1 = cutEnv1.clip(40, 18000);
-      cutEnv2 = cutEnv2.clip(40, 18000);
-      resScaledBPF = res.linlin(0, 1, 0.8, 0.03);
-      filt1 = BPF.ar(sig, cutEnv1, resScaledBPF) * (2 + (res * 10));
-      filt2 = BPF.ar(sig, cutEnv2, resScaledBPF) * (2 + (res * 10));
+      cutEnv1 = peak1Freq * (1 + (envFilt * envMod * 3) + (driftLfo1 * 0.02));
+      cutEnv2 = peak2Freq * (1 + (envFilt * envMod * 2) + (driftLfo2 * 0.02));
+      cutEnv1 = cutEnv1.clip(60, 16000);
+      cutEnv2 = cutEnv2.clip(60, 16000);
+      resScaledBPF = res.linlin(0, 1, 0.6, 0.08); // min rq 0.08 not 0.03
+      filt1 = BPF.ar(sig, cutEnv1, resScaledBPF) * (1.5 + (res * 4)); // gentler boost
+      filt2 = BPF.ar(sig, cutEnv2, resScaledBPF) * (1.5 + (res * 4));
       stereoSpec = [
         (filt1 * 0.7) + (filt2 * 0.3),
         (filt1 * 0.3) + (filt2 * 0.7)
       ];
-      stereoSpec = (stereoSpec * 1.5).tanh;
-      spectralFilt = Balance2.ar(stereoSpec[0], stereoSpec[1], pan + (driftLfo1 * 0.06)) * 2.0;
+      stereoSpec = stereoSpec.tanh; // single clean limiter
+      spectralFilt = Balance2.ar(stereoSpec[0], stereoSpec[1], pan + (driftLfo1 * 0.06)) * 1.8;
 
       // ── CROSSFADE FILTER OUTPUTS ──
       filtSig = (analogFilt * (1 - vm)) + (spectralFilt * vm);
@@ -157,8 +158,8 @@ Engine_Tessera : CroneEngine {
 
       sig = In.ar(in, 2);
 
-      delayed = CombC.ar(sig, 2.0, time.clip(0.01, 2.0), feedback * 6);
-      delayed = (delayed * 1.3).tanh * 0.8;
+      delayed = CombC.ar(sig, 2.0, time.clip(0.01, 2.0), feedback * 4);
+      delayed = delayed.tanh * 0.7; // gentler saturation
       delayed = LPF.ar(delayed, color.clip(200, 12000));
       delayed = HPF.ar(delayed, 60);
 
