@@ -62,7 +62,7 @@ local CH_PRESETS = {
    saw=0.9, pulse=0.0, sub=0.2, noise=0.0,
    detune=0.15, pw=0.5, cutoff=800, res=0.8,
    drive=1.0, env_mod=1.0,
-   drift=0.1, decay=0.2, release=0.1, amp=0.7, pan=-0.5, delay_send=0.3,
+   drift=0.1, decay=0.2, release=0.1, amp=0.7, pan=-0.2, delay_send=0.3,
    partials=4, tilt=0.8, spread=0.2,
    peak1=600, peak2=2200, peak_spread=0.3},
   -- ch2: KICK -- analog mode, sub bass
@@ -78,7 +78,7 @@ local CH_PRESETS = {
    saw=0.5, pulse=0.3, sub=0.0, noise=0.4,
    detune=0.3, pw=0.5, cutoff=4000, res=0.7,
    drive=1.5, env_mod=0.9,
-   drift=0.05, decay=0.06, release=0.03, amp=0.75, pan=0.5, delay_send=0.2,
+   drift=0.05, decay=0.06, release=0.03, amp=0.75, pan=0.25, delay_send=0.2,
    partials=6, tilt=0.3, spread=0.8,
    peak1=1800, peak2=4500, peak_spread=0.6},
   -- ch4: DARK -- spectral mode, drifting spectral fog
@@ -86,7 +86,7 @@ local CH_PRESETS = {
    saw=0.4, pulse=0.0, sub=0.3, noise=0.1,
    detune=0.4, pw=0.5, cutoff=600, res=0.35,
    drive=0.4, env_mod=0.3,
-   drift=0.7, decay=1.5, release=1.0, amp=0.5, pan=0.7, delay_send=0.6,
+   drift=0.7, decay=1.5, release=1.0, amp=0.5, pan=0.2, delay_send=0.6,
    partials=5, tilt=1.5, spread=0.7,
    peak1=400, peak2=1200, peak_spread=0.5},
 }
