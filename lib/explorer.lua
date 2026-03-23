@@ -139,7 +139,7 @@ function Explorer:mutate_rhythm()
     -- randomize probability on a step
     local step = math.random(1, c.steps)
     if c.pattern[step] == 1 then
-      local probs = {100, 100, 75, 75, 50, 25}
+      local probs = {100, 100, 100, 75, 75, 50}
       c.probability[step] = probs[math.random(1, #probs)]
     end
 
@@ -196,11 +196,12 @@ end
 
 function Explorer:apply_phase()
   -- phases create macro-structure: sparse → building → full → breaking
+  -- kick (ch2) NEVER muted — the beat must go on
   local mute_map = {
-    {false, true,  true,  true },  -- sparse: only ch1
-    {false, false, true,  false},  -- building: ch1 + ch2 + ch4
+    {false, false, true,  true },  -- sparse: acid + kick
+    {false, false, false, false},  -- building: all channels
     {false, false, false, false},  -- full: all channels
-    {false, false, false, true },  -- breaking: drop ch4, add tension
+    {false, false, true,  false},  -- breaking: drop noise, keep texture
   }
 
   local mutes = mute_map[self.phase]
