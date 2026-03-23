@@ -1,4 +1,4 @@
-// Engine_Tessera v6 — Dual Mode: Analog + Spectral
+// Engine_Tessera v7 — Dual Mode: Analog + Spectral
 // 4 channels x 2 voices each (8 total, only active mode sounds)
 //
 // Analog: MoogFF subtractive — 2 detuned saws + pulse + sub + noise
@@ -20,12 +20,12 @@ Engine_Tessera : CroneEngine {
     delayBus = Bus.audio(context.server, 2);
     reverbBus = Bus.audio(context.server, 2);
     channelModes = Array.fill(4, { 0 });
-    channelAmps = Array.fill(4, { 0.5 });
+    channelAmps = Array.fill(4, { 0.7 });
 
     // ── ANALOG VOICE (MoogFF subtractive) ─────────────
     SynthDef(\tessera_analog, {
       arg out=0, delayOut=0,
-          freq=220, amp=0.5, t_gate=0, accent=1,
+          freq=220, amp=0.7, t_gate=0, accent=1,
           atk=0.005, dec=0.5, rel=0.3,
           sawLvl=0.9, pulseLvl=0.0, subLvl=0.2, noiseLvl=0.0,
           detune=0.15, pulseWidth=0.5,
@@ -85,11 +85,10 @@ Engine_Tessera : CroneEngine {
 
       sig = MoogFF.ar(sig, cutEnv, resScaled);
 
-      // stereo spread
-      sig = Pan2.ar(sig, pan + (driftLfo1 * 0.06));
-
-      // ── OUTPUT ──
+      // ── OUTPUT — boost + Pan2 for proper stereo ──
+      sig = sig * 2.5;
       sig = sig * env * amp;
+      sig = Pan2.ar(sig, pan + (driftLfo1 * 0.06));
 
       Out.ar(out, sig);
       Out.ar(delayOut, sig * delaySend);
@@ -98,7 +97,7 @@ Engine_Tessera : CroneEngine {
     // ── SPECTRAL VOICE (Resynthesizer) ────────────────
     SynthDef(\tessera_spectral, {
       arg out=0, delayOut=0,
-          freq=220, amp=0.5, t_gate=0, accent=1,
+          freq=220, amp=0.7, t_gate=0, accent=1,
           atk=0.005, dec=0.5, rel=0.3,
           partials=6, tilt=1.0,
           spread=0.3, t_freeze=0,
@@ -116,6 +115,7 @@ Engine_Tessera : CroneEngine {
       var partialSaw, partialSin, partialMix;
       var driveGain, freezeFlag;
       var cutEnv1, cutEnv2, resScaled;
+      var stereoSig;
 
       portFreq = Lag.kr(freq, slewTime);
 
@@ -156,11 +156,11 @@ Engine_Tessera : CroneEngine {
         partialMix * partialAmp;
       });
 
-      sig = sig * 0.2;
+      sig = sig * 0.35;
 
       // fundamental body
-      sig = sig + (Saw.ar(portFreq * (1 + (driftLfo1 * 0.004))) * 0.3);
-      sig = sig + (Saw.ar(portFreq * (1 - (driftLfo2 * 0.004))) * 0.3);
+      sig = sig + (Saw.ar(portFreq * (1 + (driftLfo1 * 0.004))) * 0.4);
+      sig = sig + (Saw.ar(portFreq * (1 - (driftLfo2 * 0.004))) * 0.4);
 
       // ── PRE-FILTER SATURATION ──
       driveGain = 1 + (drive * 3);
@@ -180,23 +180,26 @@ Engine_Tessera : CroneEngine {
       filt1 = BPF.ar(sig, cutEnv1, resScaled);
       filt2 = BPF.ar(sig, cutEnv2, resScaled);
 
-      filt1 = filt1 * (1 + (res * 6));
-      filt2 = filt2 * (1 + (res * 6));
+      // boost BPF output (BPF is very quiet by nature)
+      filt1 = filt1 * (2 + (res * 10));
+      filt2 = filt2 * (2 + (res * 10));
 
-      sig = [
+      // stereo spread: peak1 left, peak2 right
+      stereoSig = [
         (filt1 * 0.7) + (filt2 * 0.3),
         (filt1 * 0.3) + (filt2 * 0.7)
       ];
 
       // ── POST-FILTER SATURATION ──
-      sig = (sig * 1.2).tanh * 0.85;
+      stereoSig = (stereoSig * 1.5).tanh;
 
-      // ── OUTPUT ──
-      sig = sig * env * amp;
-      sig = Balance2.ar(sig[0], sig[1], pan + (driftLfo1 * 0.06));
+      // ── OUTPUT — boost + Balance2 for stereo ──
+      stereoSig = stereoSig * 2.0;
+      stereoSig = stereoSig * env * amp;
+      stereoSig = Balance2.ar(stereoSig[0], stereoSig[1], pan + (driftLfo1 * 0.06));
 
-      Out.ar(out, sig);
-      Out.ar(delayOut, sig * delaySend);
+      Out.ar(out, stereoSig);
+      Out.ar(delayOut, stereoSig * delaySend);
     }).add;
 
     // ── TAPE DELAY (Mimeophon-inspired) ─────────────
@@ -242,6 +245,7 @@ Engine_Tessera : CroneEngine {
     context.server.sync;
 
     // instantiate 4 analog + 4 spectral voices
+    // IMPORTANT: start with amp=0, mode command sets correct voice live
     analogVoices = Array.fill(4, {
       Synth(\tessera_analog, [
         \out, reverbBus, \delayOut, delayBus, \amp, 0

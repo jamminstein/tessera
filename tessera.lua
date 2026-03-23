@@ -1,24 +1,21 @@
 -- tessera
 -- algorithmic mosaic synth
 --
--- multi repetitor rhythms
--- ziggurat pitch chains
 -- 4 channels: analog (MoogFF) or spectral (resynthesizer)
+-- repetitor rhythms + ziggurat pitch chains
 --
--- E1: page (rhythm/pitch/voice/fx)
--- E2: select channel or param
--- E3: adjust value
+-- E1: page
 -- K2: play/stop
--- K3: performance freeze (hold)
---     on rhythm page: hold grid step + E3 = ratchet
---     on pitch page: hold grid step + E3 = edit note
+-- K3: freeze (hold) / randomize voice (tap on voice page)
 --
--- grid top 4 rows: rhythm steps
---   brightness = probability (dim=maybe)
---   hold step + E3 = set ratchet (1-4x)
---   K3 + tap step = cycle probability
--- grid bottom 4 rows: pitch chain
---   hold step + E3 = edit pitch
+-- PAGE 1 PLAY: overview of all 4 channels
+--   E2: select channel  E3: BPM (K3 held: division)
+-- PAGE 2 RHYTHM: selected channel rhythm detail
+--   E2: rhythm mode  E3: pulses/offset (K3 held)
+-- PAGE 3 VOICE: mode-aware param editor
+--   E2: select param  E3: adjust  K3 tap: randomize
+-- PAGE 4 MACRO/FX: macro controls + FX
+--   E2: select  E3: adjust
 
 engine.name = "Tessera"
 
@@ -46,10 +43,10 @@ local screen_dirty = true
 local grid_dirty = true
 
 local key3_held = false
-local grid_held = nil        -- {ch=, step=, type="rhythm"|"pitch"}
-local frozen = false         -- performance freeze active
+local grid_held = nil
+local frozen = false
 local freeze_release_clock = nil
-local explorer = nil         -- autonomous bandmate
+local explorer = nil
 
 local active_notes = {{}, {}, {}, {}}
 
@@ -59,67 +56,204 @@ local DIV_NAMES = {"1/4", "1/8", "1/16", "1/32"}
 
 local MODE_NAMES = {"analog", "spectral"}
 
--- mode-specific param lists for voice page navigation
-local ANALOG_PARAMS = {
-  "saw", "pulse", "sub", "noise",
-  "detune", "pw", "cutoff", "res",
-  "drive", "env_mod", "drift", "decay", "release",
-  "amp", "delay_send"
-}
-
-local SPECTRAL_PARAMS = {
-  "partials", "tilt", "spread", "drive",
-  "peak1", "peak2", "peak_spread", "res",
-  "env_mod", "drift", "decay", "release",
-  "amp", "delay_send"
-}
-
--- returns the active param list for a channel
-local function voice_params_for(ch)
-  local m = params:get("ch" .. ch .. "_mode")
-  if m == 1 then return ANALOG_PARAMS else return SPECTRAL_PARAMS end
-end
-
 local CH_PRESETS = {
-  -- ch1: ACID — analog mode, 303-style acid
+  -- ch1: ACID -- analog mode, 303-style acid
   {mode=0,
    saw=0.9, pulse=0.0, sub=0.2, noise=0.0,
    detune=0.15, pw=0.5, cutoff=800, res=0.8,
    drive=1.0, env_mod=1.0,
-   drift=0.1, decay=0.2, release=0.1, amp=0.6, pan=-0.5, delay_send=0.3,
-   -- spectral defaults (kept in sync for mode switching)
+   drift=0.1, decay=0.2, release=0.1, amp=0.7, pan=-0.5, delay_send=0.3,
    partials=4, tilt=0.8, spread=0.2,
    peak1=600, peak2=2200, peak_spread=0.3},
-  -- ch2: KICK — analog mode, sub bass
+  -- ch2: KICK -- analog mode, sub bass
   {mode=0,
    saw=0.5, pulse=0.0, sub=0.9, noise=0.0,
    detune=0.0, pw=0.5, cutoff=300, res=0.5,
    drive=1.8, env_mod=1.0,
-   drift=0.0, decay=0.15, release=0.1, amp=0.85, pan=0.0, delay_send=0.0,
+   drift=0.0, decay=0.15, release=0.1, amp=0.9, pan=0.0, delay_send=0.0,
    partials=2, tilt=2.5, spread=0.0,
    peak1=80, peak2=200, peak_spread=0.0},
-  -- ch3: NOISE — spectral mode, metallic alien percussion
+  -- ch3: NOISE -- spectral mode, metallic alien percussion
   {mode=1,
    saw=0.5, pulse=0.3, sub=0.0, noise=0.4,
    detune=0.3, pw=0.5, cutoff=4000, res=0.7,
    drive=1.5, env_mod=0.9,
-   drift=0.05, decay=0.06, release=0.03, amp=0.7, pan=0.5, delay_send=0.2,
+   drift=0.05, decay=0.06, release=0.03, amp=0.75, pan=0.5, delay_send=0.2,
    partials=6, tilt=0.3, spread=0.8,
    peak1=1800, peak2=4500, peak_spread=0.6},
-  -- ch4: DARK — spectral mode, drifting spectral fog
+  -- ch4: DARK -- spectral mode, drifting spectral fog
   {mode=1,
    saw=0.4, pulse=0.0, sub=0.3, noise=0.1,
    detune=0.4, pw=0.5, cutoff=600, res=0.35,
    drive=0.4, env_mod=0.3,
-   drift=0.7, decay=1.5, release=1.0, amp=0.4, pan=0.7, delay_send=0.6,
+   drift=0.7, decay=1.5, release=1.0, amp=0.5, pan=0.7, delay_send=0.6,
    partials=5, tilt=1.5, spread=0.7,
    peak1=400, peak2=1200, peak_spread=0.5},
 }
 
 local CH_LABELS = {"ACID", "KICK", "NOISE", "DARK"}
 
-local FX_PARAMS = {"delay_time", "delay_feedback", "delay_color", "delay_mix",
-                    "halo", "reverb_mix", "reverb_size"}
+----------------------------------------------------------------
+-- macros
+----------------------------------------------------------------
+
+local MACRO_NAMES = {"GRIT", "SPACE", "CHAOS", "TIGHT"}
+local macro_values = {0, 0, 0, 0}
+
+-- apply macro changes across all channels
+local function apply_macro_grit(val)
+  for ch = 1, 4 do
+    local base_drive = CH_PRESETS[ch].drive
+    local base_res = CH_PRESETS[ch].res
+    params:set("ch" .. ch .. "_drive", base_drive + val * 1.2)
+    params:set("ch" .. ch .. "_res", math.min(0.95, base_res + val * 0.3))
+    if params:get("ch" .. ch .. "_mode") == 1 then
+      -- analog: close filter
+      local base_co = CH_PRESETS[ch].cutoff
+      params:set("ch" .. ch .. "_cutoff", base_co * (1 - val * 0.4))
+    else
+      -- spectral: lower peaks
+      local base_p1 = CH_PRESETS[ch].peak1
+      params:set("ch" .. ch .. "_peak1", base_p1 * (1 - val * 0.3))
+    end
+  end
+end
+
+local function apply_macro_space(val)
+  params:set("delay_mix", 0.2 + val * 0.5)
+  params:set("halo", 0.1 + val * 0.7)
+  params:set("reverb_mix", 0.15 + val * 0.5)
+  params:set("reverb_size", 0.5 + val * 0.45)
+  for ch = 1, 4 do
+    local base_ds = CH_PRESETS[ch].delay_send
+    params:set("ch" .. ch .. "_delay_send", math.min(1.0, base_ds + val * 0.4))
+  end
+end
+
+local function apply_macro_chaos(val)
+  for ch = 1, 4 do
+    local base_drift = CH_PRESETS[ch].drift
+    params:set("ch" .. ch .. "_drift", math.min(1.0, base_drift + val * 0.6))
+    if params:get("ch" .. ch .. "_mode") == 2 then
+      local base_spread = CH_PRESETS[ch].spread
+      params:set("ch" .. ch .. "_spread", math.min(1.0, base_spread + val * 0.5))
+    end
+  end
+  if explorer then
+    explorer.intensity = 0.3 + val * 0.6
+    params:set("explorer_intensity", explorer.intensity)
+  end
+end
+
+local function apply_macro_tight(val)
+  for ch = 1, 4 do
+    local base_dec = CH_PRESETS[ch].decay
+    local base_rel = CH_PRESETS[ch].release
+    local base_drive = CH_PRESETS[ch].drive
+    params:set("ch" .. ch .. "_decay", base_dec * (1 - val * 0.6))
+    params:set("ch" .. ch .. "_release", base_rel * (1 - val * 0.6))
+    params:set("ch" .. ch .. "_drive", base_drive + val * 0.8)
+  end
+end
+
+local macro_fns = {apply_macro_grit, apply_macro_space, apply_macro_chaos, apply_macro_tight}
+
+local function set_macro(idx, val)
+  macro_values[idx] = util.clamp(val, 0, 1)
+  macro_fns[idx](macro_values[idx])
+end
+
+----------------------------------------------------------------
+-- voice page params
+----------------------------------------------------------------
+
+-- analog params shown on voice page (display name, param suffix, bar_max)
+local ANALOG_VOICE = {
+  {name="cutoff", key="cutoff", max=18000, log=true},
+  {name="res",    key="res",    max=0.95},
+  {name="drive",  key="drive",  max=2.0},
+  {name="envmod", key="env_mod", max=1.0},
+  {name="saw",    key="saw",    max=1.0},
+  {name="pulse",  key="pulse",  max=1.0},
+  {name="sub",    key="sub",    max=1.0},
+  {name="noise",  key="noise",  max=1.0},
+  {name="detune", key="detune", max=1.0},
+  {name="decay",  key="decay",  max=4.0, log=true},
+  {name="amp",    key="amp",    max=1.0},
+  {name="dlysnd", key="delay_send", max=1.0},
+}
+
+-- spectral params shown on voice page
+local SPECTRAL_VOICE = {
+  {name="peak1",  key="peak1",  max=8000, log=true},
+  {name="peak2",  key="peak2",  max=12000, log=true},
+  {name="res",    key="res",    max=0.95},
+  {name="drive",  key="drive",  max=2.0},
+  {name="parts",  key="partials", max=6},
+  {name="tilt",   key="tilt",   max=3.0},
+  {name="spread", key="spread", max=1.0},
+  {name="envmod", key="env_mod", max=1.0},
+  {name="decay",  key="decay",  max=4.0, log=true},
+  {name="amp",    key="amp",    max=1.0},
+  {name="dlysnd", key="delay_send", max=1.0},
+}
+
+local function voice_param_list()
+  local m = params:get("ch" .. sel_ch .. "_mode")
+  return m == 1 and ANALOG_VOICE or SPECTRAL_VOICE
+end
+
+----------------------------------------------------------------
+-- FX params for macro page bottom half
+----------------------------------------------------------------
+
+local FX_PAGE = {
+  {name="dly time", key="delay_time"},
+  {name="dly fb",   key="delay_feedback"},
+  {name="dly color", key="delay_color"},
+  {name="dly mix",  key="delay_mix"},
+  {name="halo",     key="halo"},
+  {name="rev mix",  key="reverb_mix"},
+  {name="rev size", key="reverb_size"},
+}
+
+-- macro page items: 4 macros + 7 FX = 11 total
+local MACRO_PAGE_COUNT = #MACRO_NAMES + #FX_PAGE
+
+----------------------------------------------------------------
+-- voice randomize
+----------------------------------------------------------------
+
+local function randomize_voice(ch)
+  local m = params:get("ch" .. ch .. "_mode")
+  if m == 1 then
+    -- analog
+    params:set("ch" .. ch .. "_cutoff", 200 + math.random() * 5800)
+    params:set("ch" .. ch .. "_res", 0.1 + math.random() * 0.7)
+    params:set("ch" .. ch .. "_drive", 0.1 + math.random() * 1.4)
+    params:set("ch" .. ch .. "_env_mod", math.random() * 1.0)
+    -- random osc mix that sums to ~1
+    local s = math.random() * 0.9
+    local p = math.random() * (1 - s) * 0.8
+    local sb = math.random() * (1 - s - p) * 0.9
+    local n = math.random() * 0.3
+    params:set("ch" .. ch .. "_saw", s)
+    params:set("ch" .. ch .. "_pulse", p)
+    params:set("ch" .. ch .. "_sub", sb)
+    params:set("ch" .. ch .. "_noise", n)
+    params:set("ch" .. ch .. "_detune", math.random() * 0.5)
+  else
+    -- spectral
+    params:set("ch" .. ch .. "_peak1", 100 + math.random() * 3900)
+    params:set("ch" .. ch .. "_peak2", 500 + math.random() * 7500)
+    params:set("ch" .. ch .. "_res", 0.1 + math.random() * 0.7)
+    params:set("ch" .. ch .. "_tilt", 0.3 + math.random() * 2.2)
+    params:set("ch" .. ch .. "_spread", 0.1 + math.random() * 0.7)
+    params:set("ch" .. ch .. "_partials", math.random(2, 6))
+    params:set("ch" .. ch .. "_drive", 0.1 + math.random() * 1.2)
+    params:set("ch" .. ch .. "_env_mod", math.random() * 0.8)
+  end
+end
 
 ----------------------------------------------------------------
 -- init
@@ -137,7 +271,6 @@ function init()
 
   params:add_option("division", "division", DIV_NAMES, 3)
 
-  -- default to A (index 10) for dark minor feel
   params:add_option("root", "root note", NOTE_NAMES, 10)
   params:set_action("root", function(v)
     zig:set_scale(v - 1, params:get("scale"))
@@ -147,8 +280,6 @@ function init()
   for i = 1, #musicutil.SCALES do
     scale_names[i] = musicutil.SCALES[i].name
   end
-  -- default to minor pentatonic (index 6 in musicutil) for dark/tribal feel
-  -- find minor pentatonic index
   local default_scale = 1
   for i = 1, #scale_names do
     if scale_names[i] == "Minor Pentatonic" then default_scale = i; break end
@@ -200,7 +331,6 @@ function init()
     local pre = CH_PRESETS[ch]
     params:add_separator("CH " .. ch .. " " .. CH_LABELS[ch])
 
-    -- engine mode: analog or spectral
     params:add_option("ch" .. ch .. "_mode", "engine mode", MODE_NAMES, pre.mode + 1)
     params:set_action("ch" .. ch .. "_mode", function(v)
       engine.mode(ch - 1, v - 1)
@@ -346,7 +476,7 @@ function init()
   -- main sequencer
   clock.run(step_clock)
 
-  -- ratchet sub-clock (runs at 4x division for ratchet bursts)
+  -- ratchet sub-clock
   clock.run(ratchet_clock)
 
   -- screen/grid refresh
@@ -363,17 +493,14 @@ end
 -- sequencer
 ----------------------------------------------------------------
 
--- pending ratchets: {ch, freq, accent, remaining, slew}
 local ratchet_queue = {}
 
 function step_clock()
   while true do
     clock.sync(DIVISIONS[params:get("division")])
     if playing and not frozen then
-      -- update harmonic drift once per master step
       zig:update_drift()
 
-      -- explorer autonomous mutations
       local voice_changes = explorer:step()
       if voice_changes then
         for _, change in ipairs(voice_changes) do
@@ -394,7 +521,6 @@ function step_clock()
 
           trigger_voice(ch, freq, accent, slew, note)
 
-          -- queue ratchet sub-hits
           if ratch and ratch > 1 then
             ratchet_queue[ch] = {
               freq = freq,
@@ -414,7 +540,6 @@ end
 
 function ratchet_clock()
   while true do
-    -- run at 4x the main division for sub-triggers
     clock.sync(DIVISIONS[params:get("division")] / 4)
     if playing and not frozen then
       for ch = 1, 4 do
@@ -422,7 +547,7 @@ function ratchet_clock()
         if r and r.remaining > 0 then
           trigger_voice(ch, r.freq, r.accent, r.slew, r.note)
           r.remaining = r.remaining - 1
-          r.accent = r.accent * 0.85  -- each sub-hit softer
+          r.accent = r.accent * 0.85
           if r.remaining <= 0 then
             ratchet_queue[ch] = nil
           end
@@ -455,7 +580,6 @@ end
 
 function enter_freeze()
   frozen = true
-  -- retrigger all voices with long decay + spectral freeze (spectral only)
   for ch = 1, 4 do
     local note = zig.channels[ch].last_note
     local freq = musicutil.note_num_to_freq(note)
@@ -473,7 +597,6 @@ end
 function release_freeze()
   frozen = false
   ratchet_queue = {}
-  -- release spectral freeze (spectral channels only)
   for ch = 1, 4 do
     if params:get("ch" .. ch .. "_mode") == 2 then
       engine.freeze(ch - 1, 0)
@@ -491,75 +614,76 @@ function enc(n, d)
     page = util.clamp(page + d, 1, NUM_PAGES)
     sel_param = 1
   elseif n == 2 then
-    if page == 3 then
-      local vp = voice_params_for(sel_ch)
+    if page == 1 then
+      sel_ch = util.clamp(sel_ch + d, 1, 4)
+    elseif page == 2 then
+      -- rhythm mode
+      local c = rep.channels[sel_ch]
+      c.mode = util.clamp(c.mode + d, 1, rep:get_num_modes())
+      rep:regenerate(sel_ch)
+    elseif page == 3 then
+      local vp = voice_param_list()
       sel_param = util.clamp(sel_param + d, 1, #vp)
     elseif page == 4 then
-      sel_param = util.clamp(sel_param + d, 1, #FX_PARAMS)
-    else
-      sel_ch = util.clamp(sel_ch + d, 1, 4)
+      sel_param = util.clamp(sel_param + d, 1, MACRO_PAGE_COUNT)
     end
   elseif n == 3 then
     if grid_held then
       if grid_held.type == "rhythm" then
-        -- hold rhythm step + E3 = set ratchet count
         local c = rep.channels[grid_held.ch]
         local cur = c.ratchets[grid_held.step] or 1
         local new = util.clamp(cur + d, 1, 4)
         rep:set_ratchet(grid_held.ch, grid_held.step, new)
       elseif grid_held.type == "pitch" then
-        -- hold pitch step + E3 = edit note
         local c = zig.channels[grid_held.ch]
         local cur = c.chain[grid_held.step] or 60
         local new = util.clamp(cur + d, c.range_lo, c.range_hi)
         new = zig:quantize(new)
         c.chain[grid_held.step] = new
       end
-    elseif page == 1 then enc_rhythm(d)
-    elseif page == 2 then enc_pitch(d)
-    elseif page == 3 then enc_voice(d)
-    elseif page == 4 then enc_fx(d)
+    elseif page == 1 then
+      -- E3 on play page: BPM (or division with K3 held)
+      if key3_held then
+        params:delta("division", d)
+      else
+        params:delta("bpm", d)
+      end
+    elseif page == 2 then
+      -- E3 on rhythm page: pulses/offset
+      local c = rep.channels[sel_ch]
+      if key3_held then
+        c.offset = (c.offset + d) % c.steps
+      else
+        if c.mode == 1 then
+          c.pulses = util.clamp(c.pulses + d, 0, c.steps)
+        else
+          c.offset = (c.offset + d) % c.steps
+        end
+      end
+      rep:regenerate(sel_ch)
+    elseif page == 3 then
+      -- E3 on voice page: adjust selected param
+      local vp = voice_param_list()
+      local p = vp[sel_param]
+      if p then
+        local pkey = "ch" .. sel_ch .. "_" .. p.key
+        if params.lookup[pkey] then params:delta(pkey, d) end
+      end
+    elseif page == 4 then
+      -- E3 on macro page: adjust macro or FX param
+      if sel_param <= #MACRO_NAMES then
+        set_macro(sel_param, macro_values[sel_param] + d * 0.02)
+      else
+        local fx_idx = sel_param - #MACRO_NAMES
+        local fp = FX_PAGE[fx_idx]
+        if fp and params.lookup[fp.key] then
+          params:delta(fp.key, d)
+        end
+      end
     end
   end
   screen_dirty = true
   grid_dirty = true
-end
-
-function enc_rhythm(d)
-  local c = rep.channels[sel_ch]
-  if key3_held then
-    if c.mode == 1 then
-      c.pulses = util.clamp(c.pulses + d, 0, c.steps)
-    else
-      c.offset = (c.offset + d) % c.steps
-    end
-  else
-    c.mode = util.clamp(c.mode + d, 1, rep:get_num_modes())
-  end
-  rep:regenerate(sel_ch)
-end
-
-function enc_pitch(d)
-  local c = zig.channels[sel_ch]
-  if key3_held then
-    zig:set_chain_length(sel_ch, c.chain_len + d)
-  else
-    c.advance_mode = util.clamp(c.advance_mode + d, 1, zig:get_num_modes())
-  end
-end
-
-function enc_voice(d)
-  local vp = voice_params_for(sel_ch)
-  local pname = vp[sel_param]
-  if pname then
-    local pkey = "ch" .. sel_ch .. "_" .. pname
-    if params.lookup[pkey] then params:delta(pkey, d) end
-  end
-end
-
-function enc_fx(d)
-  local pkey = FX_PARAMS[sel_param]
-  if pkey and params.lookup[pkey] then params:delta(pkey, d) end
 end
 
 ----------------------------------------------------------------
@@ -579,12 +703,19 @@ function key(n, z)
       playing = true
     end
   elseif n == 3 then
-    key3_held = z == 1
-    -- performance freeze: hold K3 = freeze, release = unfreeze
-    if z == 1 and playing then
-      enter_freeze()
-    elseif z == 0 and frozen then
-      release_freeze()
+    if z == 1 then
+      key3_held = true
+      if page == 3 then
+        -- K3 tap on voice page = randomize selected channel
+        randomize_voice(sel_ch)
+      elseif playing then
+        enter_freeze()
+      end
+    else
+      key3_held = false
+      if frozen then
+        release_freeze()
+      end
     end
   end
   screen_dirty = true
@@ -607,7 +738,7 @@ end
 -- screen
 ----------------------------------------------------------------
 
-local PAGE_NAMES = {"RHYTHM", "PITCH", "VOICE", "FX"}
+local PAGE_NAMES = {"PLAY", "RHYTHM", "VOICE", "MACRO"}
 
 function redraw()
   screen.clear()
@@ -620,17 +751,17 @@ function redraw()
   screen.move(1, 7)
   screen.text("TESSERA")
 
-  -- freeze indicator
   if frozen then
     screen.level(15)
     screen.move(50, 7)
-    screen.text("FROZEN")
+    screen.text("FRZ")
   end
 
   screen.level(8)
   screen.move(128, 7)
   screen.text_right(PAGE_NAMES[page])
 
+  -- page dots
   for i = 1, NUM_PAGES do
     screen.level(i == page and 15 or 3)
     screen.rect(55 + (i-1)*5, 3, 3, 3)
@@ -642,17 +773,17 @@ function redraw()
   screen.line(128, 9)
   screen.stroke()
 
-  if page == 1 then draw_rhythm()
-  elseif page == 2 then draw_pitch()
+  if page == 1 then draw_play()
+  elseif page == 2 then draw_rhythm()
   elseif page == 3 then draw_voice()
-  elseif page == 4 then draw_fx()
+  elseif page == 4 then draw_macro()
   end
 
   -- footer
   screen.level(3)
-  screen.move(1, 63)
-  if explorer.active then
+  if explorer and explorer.active then
     screen.level(8)
+    screen.move(1, 63)
     screen.text(explorer:get_phase_name())
     screen.level(3)
   end
@@ -667,267 +798,325 @@ function redraw()
   screen.update()
 end
 
-function draw_rhythm()
+----------------------------------------------------------------
+-- PAGE 1: PLAY -- overview of all 4 channels
+----------------------------------------------------------------
+
+function draw_play()
   for ch = 1, 4 do
     local c = rep.channels[ch]
-    local y = 12 + (ch - 1) * 12
+    local zc = zig.channels[ch]
+    local y = 11 + (ch - 1) * 13
     local is_sel = ch == sel_ch
 
-    screen.level(is_sel and 15 or 4)
-    screen.move(1, y + 7)
-    screen.text(ch)
+    -- channel label
+    screen.level(is_sel and 15 or 5)
+    screen.move(1, y + 8)
+    screen.text(CH_LABELS[ch])
 
-    local x0 = 10
-    local w = math.floor(78 / c.steps)
-    for i = 1, c.steps do
-      local x = x0 + (i - 1) * w
-      local is_play = (i == c.position and playing)
-      local prob = c.probability[i] or 100
-      local ratch = c.ratchets[i] or 1
-
+    -- mini pattern visualization (32px wide)
+    local x0 = 32
+    local pw = math.floor(30 / c.steps)
+    if pw < 1 then pw = 1 end
+    for i = 1, math.min(c.steps, 16) do
+      local x = x0 + (i - 1) * pw
       if c.pattern[i] == 1 then
-        -- brightness reflects probability
-        local base_bright = is_sel and 10 or 5
-        if prob < 100 then
-          base_bright = math.max(2, math.floor(base_bright * prob / 100))
-        end
-        screen.level(is_play and 15 or base_bright)
-        screen.rect(x, y + 1, w - 1, 6)
+        local bright = (i == c.position and playing) and 15 or (is_sel and 8 or 4)
+        if c.muted then bright = 2 end
+        screen.level(bright)
+        screen.rect(x, y + 2, pw - 1, 5)
         screen.fill()
-
-        -- ratchet dots (small dots above step)
-        if ratch > 1 then
-          screen.level(is_sel and 12 or 6)
-          for r = 1, ratch - 1 do
-            screen.pixel(x + r - 1, y)
-            screen.fill()
-          end
-        end
-      elseif is_play then
-        screen.level(4)
-        screen.rect(x, y + 1, w - 1, 6)
+      elseif i == c.position and playing then
+        screen.level(3)
+        screen.rect(x, y + 2, pw - 1, 5)
         screen.fill()
       end
     end
 
-    screen.level(is_sel and 12 or 4)
-    screen.move(92, y + 7)
-    screen.text(rep:get_mode_name(ch))
-  end
-end
+    -- current note
+    local note = zc.last_note or 60
+    local name = musicutil.note_num_to_name(note, true)
+    screen.level(is_sel and 12 or 5)
+    screen.move(66, y + 8)
+    screen.text(name)
 
-function draw_pitch()
-  local rn = NOTE_NAMES[params:get("root")]
-  local sn = musicutil.SCALES[params:get("scale")].name
-  screen.level(3)
-  screen.move(50, 7)
-  screen.text_right(rn .. " " .. string.sub(sn, 1, 8))
+    -- mode indicator
+    local mode_str = MODE_NAMES[params:get("ch" .. ch .. "_mode")]
+    screen.level(is_sel and 7 or 3)
+    screen.move(86, y + 8)
+    screen.text(mode_str:sub(1,4))
 
-  for ch = 1, 4 do
-    local c = zig.channels[ch]
-    local y = 12 + (ch - 1) * 12
-    local is_sel = ch == sel_ch
-
-    screen.level(is_sel and 15 or 4)
-    screen.move(1, y + 7)
-    screen.text(ch)
-
-    local x = 10
-    for i = 1, c.chain_len do
-      local note = c.chain[i] or 60
-      local name = musicutil.note_num_to_name(note, true)
-      screen.level((i == c.position and playing) and 15 or (is_sel and 7 or 3))
-      screen.move(x, y + 7)
-      screen.text(name)
-      x = x + screen.text_extents(name) + 2
-      if x > 95 then screen.text(".."); break end
+    -- division / playing indicator
+    if playing and not c.muted then
+      screen.level(is_sel and 10 or 4)
+      screen.move(110, y + 8)
+      screen.text(rep:get_mode_name(ch))
+    elseif c.muted then
+      screen.level(2)
+      screen.move(110, y + 8)
+      screen.text("mute")
     end
-
-    screen.level(is_sel and 10 or 4)
-    screen.move(116, y + 7)
-    screen.text_right(zig:get_mode_name(ch))
-  end
-
-  -- xmod indicator
-  if zig.xmod_enabled then
-    screen.level(6)
-    screen.move(1, 60)
-    screen.text("xmod " .. zig.xmod_source .. ">" .. zig.xmod_target)
   end
 end
+
+----------------------------------------------------------------
+-- PAGE 2: RHYTHM -- selected channel rhythm detail
+----------------------------------------------------------------
+
+function draw_rhythm()
+  local c = rep.channels[sel_ch]
+
+  -- channel header
+  screen.level(12)
+  screen.move(1, 18)
+  screen.text("CH" .. sel_ch .. " " .. CH_LABELS[sel_ch])
+  screen.level(6)
+  screen.move(60, 18)
+  screen.text(rep:get_mode_name(sel_ch))
+  if c.mode == 1 then
+    screen.move(90, 18)
+    screen.text(c.pulses .. "/" .. c.steps)
+  end
+
+  -- large pattern display
+  local x0 = 2
+  local y0 = 22
+  local step_w = math.floor(124 / c.steps)
+  if step_w < 2 then step_w = 2 end
+  local step_h = 16
+
+  for i = 1, c.steps do
+    local x = x0 + (i - 1) * step_w
+    local prob = c.probability[i] or 100
+    local ratch = c.ratchets[i] or 1
+    local is_pos = (i == c.position and playing)
+
+    if c.pattern[i] == 1 then
+      -- brightness reflects probability
+      local base = 10
+      if prob < 100 then
+        base = math.max(3, math.floor(10 * prob / 100))
+      end
+      screen.level(is_pos and 15 or base)
+      screen.rect(x, y0, step_w - 1, step_h)
+      screen.fill()
+
+      -- ratchet dots below step
+      if ratch > 1 then
+        screen.level(12)
+        for r = 1, ratch do
+          local dot_x = x + math.floor((step_w - 1) / 2) - math.floor(ratch / 2) + r - 1
+          screen.pixel(dot_x, y0 + step_h + 2)
+          screen.fill()
+        end
+      end
+
+      -- probability text for low-prob steps
+      if prob < 100 then
+        screen.level(1)
+        screen.move(x + 1, y0 + step_h - 2)
+        screen.font_size(6)
+        screen.text(prob)
+        screen.font_size(8)
+      end
+    else
+      if is_pos then
+        screen.level(4)
+        screen.rect(x, y0, step_w - 1, step_h)
+        screen.fill()
+      else
+        screen.level(2)
+        screen.rect(x, y0, step_w - 1, step_h)
+        screen.stroke()
+      end
+    end
+  end
+
+  -- offset indicator
+  if c.offset > 0 then
+    screen.level(5)
+    screen.move(1, 52)
+    screen.text("off:" .. c.offset)
+  end
+
+  -- pitch advance mode
+  screen.level(5)
+  screen.move(90, 52)
+  screen.text("pitch:" .. zig:get_mode_name(sel_ch))
+end
+
+----------------------------------------------------------------
+-- PAGE 3: VOICE -- mode-aware param bars
+----------------------------------------------------------------
 
 function draw_voice()
   local mode = params:get("ch" .. sel_ch .. "_mode")
   local mode_label = MODE_NAMES[mode]
 
+  -- header
   screen.level(12)
-  screen.move(50, 7)
-  screen.text_right("CH" .. sel_ch .. " " .. CH_LABELS[sel_ch])
+  screen.move(1, 18)
+  screen.text("CH" .. sel_ch .. " " .. CH_LABELS[sel_ch])
   screen.level(6)
-  screen.move(78, 7)
+  screen.move(75, 18)
   screen.text(mode_label)
+  screen.level(3)
+  screen.move(112, 18)
+  screen.text("K3:rnd")
 
-  if mode == 1 then
-    draw_voice_analog()
-  else
-    draw_voice_spectral()
+  local vp = voice_param_list()
+  local y0 = 22
+  local bar_h = 5
+  local gap = 1
+  local max_visible = 6
+  -- scroll offset so selected param is visible
+  local scroll = 0
+  if sel_param > max_visible then
+    scroll = sel_param - max_visible
   end
 
-  -- selected param readout
-  local vp = voice_params_for(sel_ch)
-  local pname = vp[sel_param]
-  if pname then
-    local pkey = "ch" .. sel_ch .. "_" .. pname
-    screen.level(10)
-    screen.move(1, 60)
+  for i = 1, math.min(max_visible, #vp) do
+    local idx = i + scroll
+    if idx > #vp then break end
+    local p = vp[idx]
+    local is_sel = idx == sel_param
+    local y = y0 + (i - 1) * (bar_h + gap + 1)
+    local pkey = "ch" .. sel_ch .. "_" .. p.key
+
+    -- param name
+    screen.level(is_sel and 15 or 5)
+    screen.move(1, y + bar_h)
+    screen.text(p.name)
+
+    -- bar
+    local bar_x = 35
+    local bar_w = 68
+    local val = 0
     if params.lookup[pkey] then
-      screen.text(pname:gsub("_", " ") .. ": " .. params:string(pkey))
+      val = params:get(pkey)
+    end
+    local norm
+    if p.log then
+      local min_v = 0.01
+      if p.key == "cutoff" then min_v = 40
+      elseif p.key == "peak1" then min_v = 40
+      elseif p.key == "peak2" then min_v = 40
+      elseif p.key == "decay" then min_v = 0.01
+      end
+      norm = math.log(val / min_v) / math.log(p.max / min_v)
+    else
+      norm = val / p.max
+    end
+    norm = util.clamp(norm, 0, 1)
+
+    -- background
+    screen.level(2)
+    screen.rect(bar_x, y, bar_w, bar_h)
+    screen.stroke()
+
+    -- fill
+    screen.level(is_sel and 12 or 6)
+    local fill_w = math.floor(norm * bar_w)
+    if fill_w > 0 then
+      screen.rect(bar_x, y, fill_w, bar_h)
+      screen.fill()
+    end
+
+    -- value text
+    screen.level(is_sel and 15 or 7)
+    screen.move(106, y + bar_h)
+    if params.lookup[pkey] then
+      local str = params:string(pkey)
+      -- truncate long strings
+      if #str > 6 then str = str:sub(1, 6) end
+      screen.text(str)
     end
   end
-end
 
-function draw_voice_analog()
-  -- oscillator mixer bars
-  local osc_names = {"saw", "pls", "sub", "nse"}
-  local osc_keys = {"saw", "pulse", "sub", "noise"}
-  local bar_y = 13
-  local bar_w = 12
-  local bar_gap = 4
-  local bar_x0 = 4
-  for i = 1, 4 do
-    local x = bar_x0 + (i - 1) * (bar_w + bar_gap)
-    local val = params:get("ch" .. sel_ch .. "_" .. osc_keys[i])
-    local bh = math.floor(val * 14)
-    screen.level(val > 0.01 and 10 or 2)
-    screen.rect(x, bar_y + 14 - bh, bar_w, bh)
-    screen.fill()
-    screen.level(2)
-    screen.rect(x, bar_y, bar_w, 14)
-    screen.stroke()
-    screen.level(5)
-    screen.move(x + 1, bar_y + 18)
-    screen.text(osc_names[i])
+  -- scroll indicators
+  if scroll > 0 then
+    screen.level(4)
+    screen.move(125, 22)
+    screen.text("^")
   end
-
-  -- MoogFF filter curve
-  local co = params:get("ch" .. sel_ch .. "_cutoff")
-  local r = params:get("ch" .. sel_ch .. "_res")
-  local drv = params:get("ch" .. sel_ch .. "_drive")
-  local filt_y = 42
-  local filt_h = 12
-
-  screen.level(8)
-  for x = 4, 124 do
-    local f = 40 * ((18000 / 40) ^ ((x - 4) / 120))
-    local ratio = f / co
-    -- approximate moog response: 4-pole with resonance bump
-    local lp_gain = 1 / (1 + ratio ^ 4)
-    local res_bump = r * 2 / (1 + ((ratio - 1) / 0.15) ^ 2)
-    local gain = math.min(lp_gain + res_bump, 1.4)
-    local y = filt_y - math.floor(gain * filt_h)
-    if x == 4 then screen.move(x, y) else screen.line(x, y) end
-  end
-  screen.stroke()
-
-  -- cutoff marker
-  local cox = 4 + math.floor(math.log(co / 40) / math.log(18000 / 40) * 120)
-  cox = util.clamp(cox, 4, 124)
-  screen.level(15)
-  screen.pixel(cox, filt_y - filt_h - 1)
-  screen.pixel(cox - 1, filt_y - filt_h)
-  screen.pixel(cox + 1, filt_y - filt_h)
-  screen.fill()
-
-  -- drive indicator
-  if drv > 0.1 then
-    screen.level(math.floor(util.linlin(0, 2, 3, 12, drv)))
-    screen.move(108, filt_y + 4)
-    screen.text("drv")
+  if scroll + max_visible < #vp then
+    screen.level(4)
+    screen.move(125, 56)
+    screen.text("v")
   end
 end
 
-function draw_voice_spectral()
-  -- partial level bars
-  local npart = params:get("ch" .. sel_ch .. "_partials")
-  local tlt = params:get("ch" .. sel_ch .. "_tilt")
-  local bar_y = 13
-  local bar_w = 8
-  local bar_gap = 2
-  local bar_x0 = 4
-  for i = 1, 6 do
-    local x = bar_x0 + (i - 1) * (bar_w + bar_gap)
-    local amp = 1 / ((i) ^ (tlt * 0.5))
-    if i > npart then amp = 0 end
-    local bh = math.floor(amp * 14)
-    screen.level(i <= npart and 10 or 2)
-    screen.rect(x, bar_y + 14 - bh, bar_w, bh)
-    screen.fill()
-    screen.level(2)
-    screen.rect(x, bar_y, bar_w, 14)
-    screen.stroke()
-  end
+----------------------------------------------------------------
+-- PAGE 4: MACRO / FX
+----------------------------------------------------------------
 
+function draw_macro()
+  -- MACROS section (top half)
   screen.level(5)
-  screen.move(bar_x0, bar_y + 18)
-  screen.text("partials")
+  screen.move(1, 17)
+  screen.text("MACROS")
 
-  -- dual filter peaks visualization
-  local p1 = params:get("ch" .. sel_ch .. "_peak1")
-  local p2 = params:get("ch" .. sel_ch .. "_peak2")
-  local r = params:get("ch" .. sel_ch .. "_res")
-  local drv = params:get("ch" .. sel_ch .. "_drive")
-  local filt_y = 42
-  local filt_h = 12
+  for i = 1, #MACRO_NAMES do
+    local is_sel = sel_param == i
+    local y = 20 + (i - 1) * 8
 
-  screen.level(8)
-  for x = 4, 124 do
-    local f = 40 * ((12000 / 40) ^ ((x - 4) / 120))
-    local ratio1 = f / p1
-    local ratio2 = f / p2
-    local bw = util.linlin(0, 0.95, 0.8, 0.03, r)
-    local g1 = 1 / (1 + ((ratio1 - 1) / bw) ^ 2)
-    local g2 = 1 / (1 + ((ratio2 - 1) / bw) ^ 2)
-    local gain = math.max(g1, g2)
-    gain = math.min(gain, 1.4)
-    local y = filt_y - math.floor(gain * filt_h)
-    if x == 4 then screen.move(x, y) else screen.line(x, y) end
+    screen.level(is_sel and 15 or 6)
+    screen.move(1, y + 6)
+    screen.text(MACRO_NAMES[i])
+
+    -- bar
+    local bar_x = 35
+    local bar_w = 60
+    screen.level(2)
+    screen.rect(bar_x, y, bar_w, 5)
+    screen.stroke()
+
+    local fill = math.floor(macro_values[i] * bar_w)
+    if fill > 0 then
+      screen.level(is_sel and 12 or 6)
+      screen.rect(bar_x, y, fill, 5)
+      screen.fill()
+    end
+
+    -- percentage
+    screen.level(is_sel and 10 or 4)
+    screen.move(100, y + 6)
+    screen.text(math.floor(macro_values[i] * 100) .. "%")
   end
+
+  -- divider
+  screen.level(2)
+  screen.move(1, 53)
+  screen.line(128, 53)
   screen.stroke()
 
-  -- peak markers
-  local p1x = 4 + math.floor(math.log(p1 / 40) / math.log(12000 / 40) * 120)
-  local p2x = 4 + math.floor(math.log(p2 / 40) / math.log(12000 / 40) * 120)
-  p1x = util.clamp(p1x, 4, 124)
-  p2x = util.clamp(p2x, 4, 124)
-  screen.level(15)
-  screen.pixel(p1x, filt_y - filt_h - 1)
-  screen.pixel(p1x - 1, filt_y - filt_h)
-  screen.pixel(p1x + 1, filt_y - filt_h)
-  screen.fill()
-  screen.pixel(p2x, filt_y - filt_h - 1)
-  screen.pixel(p2x - 1, filt_y - filt_h)
-  screen.pixel(p2x + 1, filt_y - filt_h)
-  screen.fill()
-
-  -- drive indicator
-  if drv > 0.1 then
-    screen.level(math.floor(util.linlin(0, 2, 3, 12, drv)))
-    screen.move(108, filt_y + 4)
-    screen.text("drv")
-  end
-end
-
-function draw_fx()
-  local y = 14
-  for i, pkey in ipairs(FX_PARAMS) do
-    local is_sel = i == sel_param
-    screen.level(is_sel and 15 or 5)
-    screen.move(3, y + (i - 1) * 7)
-    screen.text(pkey:gsub("_", " "))
-
-    screen.level(is_sel and 12 or 4)
-    screen.move(126, y + (i - 1) * 7)
-    screen.text_right(params:string(pkey))
+  -- FX section (bottom -- just show selected if in FX zone)
+  local fx_sel = sel_param - #MACRO_NAMES
+  if fx_sel >= 1 and fx_sel <= #FX_PAGE then
+    local fp = FX_PAGE[fx_sel]
+    screen.level(10)
+    screen.move(1, 61)
+    screen.text(fp.name)
+    if params.lookup[fp.key] then
+      screen.move(60, 61)
+      screen.text(params:string(fp.key))
+    end
+    -- arrows
+    if fx_sel > 1 then
+      screen.level(4)
+      screen.move(115, 61)
+      screen.text("<")
+    end
+    if fx_sel < #FX_PAGE then
+      screen.level(4)
+      screen.move(123, 61)
+      screen.text(">")
+    end
+  else
+    -- show first FX as preview
+    screen.level(4)
+    screen.move(1, 61)
+    screen.text("E2 v for FX")
   end
 end
 
@@ -942,21 +1131,17 @@ g.key = function(x, y, z)
     if z == 1 then
       if x >= 1 and x <= c.steps then
         if key3_held then
-          -- K3 + tap = cycle probability (100 -> 75 -> 50 -> 25 -> 100)
           local cur = c.probability[x] or 100
           if cur > 75 then c.probability[x] = 75
           elseif cur > 50 then c.probability[x] = 50
           elseif cur > 25 then c.probability[x] = 25
           else c.probability[x] = 100 end
         else
-          -- hold for ratchet editing via E3
           grid_held = {ch = ch, step = x, type = "rhythm"}
-          -- if quick tap (released before next grid scan), toggle step
         end
       end
-      sel_ch = ch; page = 1
+      sel_ch = ch
     else
-      -- release: if still held and no E3 turn happened, toggle step
       if grid_held and grid_held.type == "rhythm" and grid_held.ch == ch and grid_held.step == x then
         if not key3_held then
           c.pattern[x] = c.pattern[x] == 1 and 0 or 1
@@ -976,10 +1161,10 @@ g.key = function(x, y, z)
     if z == 1 then
       if x >= 1 and x <= c.chain_len then
         grid_held = {ch = ch, step = x, type = "pitch"}
-        sel_ch = ch; page = 2
+        sel_ch = ch
       elseif x == c.chain_len + 1 and c.chain_len < 16 then
         zig:set_chain_length(ch, c.chain_len + 1)
-        sel_ch = ch; page = 2
+        sel_ch = ch
       end
     else
       if grid_held and grid_held.type == "pitch" and grid_held.ch == ch then
@@ -1004,9 +1189,7 @@ function grid_redraw()
 
       if c.pattern[x] == 1 then
         local base = 8
-        -- dim for low probability
         if prob < 100 then base = math.max(3, math.floor(8 * prob / 100)) end
-        -- brighter for ratchets
         if ratch > 1 then base = math.min(base + 2, 12) end
         bright = (x == c.position and playing) and 15 or base
       else
