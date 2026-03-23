@@ -23,7 +23,7 @@ Engine_Tessera : CroneEngine {
     // ── voice: spectral resynthesis ──────────────
     SynthDef(\tessera_voice, {
       arg out=0, delayOut=0,
-          freq=220, amp=0.3, gate=0, accent=1,
+          freq=220, amp=0.3, t_gate=0, accent=1,
           atk=0.003, dec=0.8,
           partials=8, tilt=0.5, spread=0.01,
           filterFreq=2000, filterQ=0.4,
@@ -33,10 +33,9 @@ Engine_Tessera : CroneEngine {
       var sig, env, portFreq;
 
       portFreq = Lag.kr(freq, slewTime);
-      env = EnvGen.kr(Env.perc(atk, dec), gate) * accent;
+      env = EnvGen.kr(Env.perc(atk, dec), t_gate) * accent;
 
       // additive spectral resynthesis
-      // partials with tilt (spectral rolloff) and drift (smear)
       sig = Mix.fill(16, { |i|
         var n = i + 1;
         var pFreq = portFreq * n;
@@ -48,7 +47,7 @@ Engine_Tessera : CroneEngine {
 
       // resonant lowpass (QPAS-inspired character)
       sig = RLPF.ar(sig, filterFreq.clip(20, 18000), filterQ.clip(0.05, 1));
-      sig = sig * 2.5; // makeup gain
+      sig = sig * 2.5;
 
       sig = sig * env * amp;
       sig = Pan2.ar(sig, pan);
@@ -58,7 +57,6 @@ Engine_Tessera : CroneEngine {
     }).add;
 
     // ── spectral delay (Mimeophon-inspired) ──────
-    // CombL for repeats, AllpassL chain for "halo" diffusion
     SynthDef(\tessera_delay, {
       arg in=0, out=0,
           time=0.3, feedback=0.5, color=4000,
@@ -70,7 +68,6 @@ Engine_Tessera : CroneEngine {
       delayed = CombL.ar(sig, 2.0, time.clip(0.01, 2.0), feedback * 6);
       delayed = LPF.ar(delayed, color.clip(200, 16000));
 
-      // halo: diffused allpass cloud
       haloSig = delayed;
       4.do { |i|
         haloSig = AllpassL.ar(haloSig, 0.5,
@@ -78,7 +75,6 @@ Engine_Tessera : CroneEngine {
           halo * 3);
       };
 
-      // only wet signal (dry goes direct to reverb from voices)
       Out.ar(out, haloSig * mix);
     }).add;
 
@@ -112,7 +108,7 @@ Engine_Tessera : CroneEngine {
     // ── voice commands (index, value) ────────────
     this.addCommand("hz",          "if", { |msg| voices[msg[1].asInteger].set(\freq, msg[2]) });
     this.addCommand("amp",         "if", { |msg| voices[msg[1].asInteger].set(\amp, msg[2]) });
-    this.addCommand("gate",        "ii", { |msg| voices[msg[1].asInteger].set(\gate, msg[2]) });
+    this.addCommand("gate",        "ii", { |msg| voices[msg[1].asInteger].set(\t_gate, msg[2]) });
     this.addCommand("atk",         "if", { |msg| voices[msg[1].asInteger].set(\atk, msg[2]) });
     this.addCommand("dec",         "if", { |msg| voices[msg[1].asInteger].set(\dec, msg[2]) });
     this.addCommand("partials",    "if", { |msg| voices[msg[1].asInteger].set(\partials, msg[2]) });
