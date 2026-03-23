@@ -79,7 +79,7 @@ local CH_PRESETS = {
    detune=0.3, pw=0.5, cutoff=4000, res=0.7,
    drive=1.5, env_mod=0.9,
    drift=0.05, decay=0.06, release=0.03, amp=0.75, pan=0.25, delay_send=0.2,
-   partials=6, tilt=0.3, spread=0.8,
+   partials=4, tilt=0.3, spread=0.8,
    peak1=1800, peak2=4500, peak_spread=0.6},
   -- ch4: DARK -- spectral mode, drifting spectral fog
   {mode=1,
@@ -87,7 +87,7 @@ local CH_PRESETS = {
    detune=0.4, pw=0.5, cutoff=600, res=0.35,
    drive=0.4, env_mod=0.3,
    drift=0.7, decay=1.5, release=1.0, amp=0.5, pan=0.2, delay_send=0.6,
-   partials=5, tilt=1.5, spread=0.7,
+   partials=4, tilt=1.5, spread=0.7,
    peak1=400, peak2=1200, peak_spread=0.5},
 }
 
@@ -189,7 +189,7 @@ local SPECTRAL_VOICE = {
   {name="peak2",  key="peak2",  max=12000, log=true},
   {name="res",    key="res",    max=0.95},
   {name="drive",  key="drive",  max=2.0},
-  {name="parts",  key="partials", max=6},
+  {name="parts",  key="partials", max=4},
   {name="tilt",   key="tilt",   max=3.0},
   {name="spread", key="spread", max=1.0},
   {name="envmod", key="env_mod", max=1.0},
@@ -249,7 +249,7 @@ local function randomize_voice(ch)
     params:set("ch" .. ch .. "_res", 0.1 + math.random() * 0.7)
     params:set("ch" .. ch .. "_tilt", 0.3 + math.random() * 2.2)
     params:set("ch" .. ch .. "_spread", 0.1 + math.random() * 0.7)
-    params:set("ch" .. ch .. "_partials", math.random(2, 6))
+    params:set("ch" .. ch .. "_partials", math.random(2, 4))
     params:set("ch" .. ch .. "_drive", 0.1 + math.random() * 1.2)
     params:set("ch" .. ch .. "_env_mod", math.random() * 0.8)
   end
@@ -333,7 +333,7 @@ function init()
 
     params:add_option("ch" .. ch .. "_mode", "engine mode", MODE_NAMES, pre.mode + 1)
     params:set_action("ch" .. ch .. "_mode", function(v)
-      engine.mode(ch - 1, v - 1)
+      engine.mode(ch - 1, (v - 1) * 1.0)  -- float: 0.0=analog, 1.0=spectral
       sel_param = 1
       screen_dirty = true
     end)
@@ -369,7 +369,7 @@ function init()
 
     -- spectral-only params
     params:add_control("ch" .. ch .. "_partials", "partials",
-      controlspec.new(1, 6, 'lin', 1, pre.partials))
+      controlspec.new(1, 4, 'lin', 1, pre.partials))
     params:set_action("ch" .. ch .. "_partials", function(v) engine.partials(ch - 1, v) end)
 
     params:add_control("ch" .. ch .. "_tilt", "tilt",
