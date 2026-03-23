@@ -1,9 +1,8 @@
-// Engine_Tessera v3
-// 4 voices — each: 2 osc + sub + noise, MoogFF ladder, tanh saturation
-// Global: tape delay w/ diffusion, plate reverb
+// Engine_Tessera v4
+// 4 voices — each: 2 osc + sub + noise, MoogFF, musical saturation
+// Global: tape delay w/ halo diffusion, plate reverb
 //
-// Design: fewer oscillators, better gain staging, musical saturation,
-// internal modulation for life. Sounds like hardware, not a spreadsheet.
+// v4: fixed gain staging — params actually change the sound now
 
 Engine_Tessera : CroneEngine {
   var voices;
@@ -18,84 +17,85 @@ Engine_Tessera : CroneEngine {
     delayBus = Bus.audio(context.server, 2);
     reverbBus = Bus.audio(context.server, 2);
 
-    // ── VOICE ────────────────────────────────────
-    // 2 oscillators (saw+pulse) mixed, sub sine, filtered noise
-    // -> tanh saturation -> MoogFF ladder -> VCA
-    // internal drift LFOs for life
     SynthDef(\tessera_voice, {
       arg out=0, delayOut=0,
-          freq=220, amp=0.3, t_gate=0, accent=1,
-          // envelope
+          freq=220, amp=0.5, t_gate=0, accent=1,
           atk=0.005, dec=0.5, rel=0.3,
-          // oscillator mix: saw, pulse, sub, noise (0-1 each)
           sawLvl=0.5, pulseLvl=0.0, subLvl=0.0, noiseLvl=0.0,
-          // timbre
           detune=0.08, pulseWidth=0.5,
-          drive=0.3,        // pre-filter saturation 0-2
-          // filter
+          drive=0.3,
           cutoff=2400, res=0.3, envMod=0.4,
-          // modulation
-          drift=0.15,       // slow pitch/filter drift amount
+          drift=0.15,
           slewTime=0.05,
           pan=0, delaySend=0.25;
 
-      var sig, osc1, osc2, sub, noise, env, envFilt, portFreq;
-      var driftLfo1, driftLfo2, cutMod;
+      var sig, osc1, osc2, pul, sub, nz, env, envFilt, portFreq;
+      var driftLfo1, driftLfo2, cutMod, driveGain;
 
       portFreq = Lag.kr(freq, slewTime);
 
-      // slow internal drift — this is what makes it breathe
+      // internal drift LFOs — analog-style wandering
       driftLfo1 = LFNoise2.kr(0.3) * drift;
       driftLfo2 = LFNoise2.kr(0.37) * drift;
 
-      // perc envelope with accent
+      // amplitude envelope
       env = EnvGen.kr(
         Env.perc(atk, dec + rel),
         t_gate
       ) * accent;
 
-      // filter envelope (faster attack, independent shape)
+      // filter envelope — fast attack, sharp decay for plucky filter sweeps
       envFilt = EnvGen.kr(
-        Env.perc(atk * 0.5, dec * 0.6),
+        Env.perc(atk * 0.3, dec * 0.5),
         t_gate
       );
 
-      // ── oscillators ────────────────────────────
-      // two detuned saws — classic thick analog sound
-      osc1 = Saw.ar(portFreq * (1 + (detune * 0.01) + (driftLfo1 * 0.002)));
-      osc2 = Saw.ar(portFreq * (1 - (detune * 0.01) + (driftLfo2 * 0.002)));
+      // ── OSCILLATORS ────────────────────────────
+      // two detuned saws — 2.5% detune at max for real thickness
+      osc1 = Saw.ar(portFreq * (1 + (detune * 0.025) + (driftLfo1 * 0.003)));
+      osc2 = Saw.ar(portFreq * (1 - (detune * 0.025) + (driftLfo2 * 0.003)));
 
-      // pulse with width modulation from drift
-      sub = Pulse.ar(portFreq, (pulseWidth + (driftLfo1 * 0.05)).clip(0.05, 0.95));
+      // pulse with PWM from drift
+      pul = Pulse.ar(portFreq, (pulseWidth + (driftLfo1 * 0.08)).clip(0.05, 0.95));
 
       // sub: pure sine one octave down
-      noise = SinOsc.ar(portFreq * 0.5);
+      sub = SinOsc.ar(portFreq * 0.5);
 
-      // mix — each level 0-1
-      sig = (osc1 * sawLvl * 0.4) + (osc2 * sawLvl * 0.4)
-          + (sub * pulseLvl * 0.5)
-          + (noise * subLvl * 0.6)
-          + (BPF.ar(PinkNoise.ar, portFreq.max(40), 0.3) * noiseLvl * 2);
+      // noise: pitched band around fundamental
+      nz = BPF.ar(PinkNoise.ar, portFreq.max(40), 0.25) * 6;
 
-      // ── saturation (pre-filter, like driving a Moog input) ──
-      sig = (sig * (1 + (drive * 3))).tanh * (1 / (1 + drive));
+      // MIX — full level, no timid multipliers
+      // each source at full amplitude when level = 1
+      sig = (osc1 + osc2) * sawLvl * 0.5  // two saws summed, half each
+          + (pul * pulseLvl)
+          + (sub * subLvl)
+          + (nz * noiseLvl);
 
-      // ── MoogFF ladder filter ───────────────────
-      // cutoff modulated by envelope + drift
-      cutMod = cutoff * (1 + (envFilt * envMod * 3) + (driftLfo2 * 0.03));
-      cutMod = cutMod.clip(30, 18000);
-      sig = MoogFF.ar(sig, cutMod, res.linlin(0, 1, 0, 3.8));
+      // ── SATURATION ─────────────────────────────
+      // soft clip, NOT hard tanh. Drive adds harmonics without killing dynamics.
+      // at drive=0: clean. at drive=1: warm. at drive=2: crunchy.
+      driveGain = 1 + (drive * 2);
+      sig = (sig * driveGain / (1 + (sig * driveGain).abs)) * (1 / driveGain.sqrt);
 
-      // ── output ─────────────────────────────────
+      // ── MOOGFF LADDER FILTER ───────────────────
+      // envelope modulation: at envMod=1, cutoff sweeps up 8x (3 octaves!)
+      cutMod = cutoff * (1 + (envFilt * envMod * 8) + (driftLfo2 * 0.05));
+      cutMod = cutMod.clip(20, 20000);
+      // resonance: 0=clean, 0.5=singing, 0.95=screaming self-oscillation
+      sig = MoogFF.ar(sig, cutMod, res.linlin(0, 1, 0, 4.0));
+
+      // post-filter makeup gain — filter attenuates, compensate
+      sig = sig * (1 + res);
+
+      // ── OUTPUT ─────────────────────────────────
       sig = sig * env * amp;
-      sig = Pan2.ar(sig, pan + (driftLfo1 * 0.05));
+      sig = Pan2.ar(sig, pan + (driftLfo1 * 0.06));
 
       Out.ar(out, sig);
       Out.ar(delayOut, sig * delaySend);
     }).add;
 
-    // ── TAPE DELAY (Mimeophon-inspired) ──────────
-    // Saturated feedback, filtered, with allpass diffusion "halo"
+    // ── TAPE DELAY ───────────────────────────────
     SynthDef(\tessera_delay, {
       arg in=0, out=0,
           time=0.375, feedback=0.45, color=3500,
@@ -104,13 +104,11 @@ Engine_Tessera : CroneEngine {
 
       sig = In.ar(in, 2);
 
-      // feedback with tape-style saturation
-      delayed = CombL.ar(sig, 2.0, time.clip(0.01, 2.0), feedback * 5);
-      delayed = (delayed * 1.2).tanh * 0.85;  // tape saturation
+      delayed = CombL.ar(sig, 2.0, time.clip(0.01, 2.0), feedback * 6);
+      delayed = (delayed * 1.3).tanh * 0.8;
       delayed = LPF.ar(delayed, color.clip(200, 12000));
-      delayed = HPF.ar(delayed, 80);  // remove mud
+      delayed = HPF.ar(delayed, 60);
 
-      // halo: diffused allpass cloud (Mimeophon's magic)
       haloSig = delayed;
       4.do { arg i;
         haloSig = AllpassC.ar(haloSig, 0.15,
@@ -121,7 +119,7 @@ Engine_Tessera : CroneEngine {
       Out.ar(out, haloSig * mix);
     }).add;
 
-    // ── REVERB (plate-style, bright but not muddy) ──
+    // ── REVERB ───────────────────────────────────
     SynthDef(\tessera_reverb, {
       arg in=0, out=0, mix=0.2, size=0.8, damp=0.4;
       var sig, dry, wet;
@@ -129,18 +127,16 @@ Engine_Tessera : CroneEngine {
       sig = In.ar(in, 2);
       dry = sig;
 
-      // pre-delay for clarity
       wet = DelayN.ar(sig, 0.05, 0.02);
       wet = FreeVerb2.ar(wet[0], wet[1], 1, size, damp);
-      wet = HPF.ar(wet, 120);  // keep reverb clean
-      wet = LPF.ar(wet, 8000); // not too bright
+      wet = HPF.ar(wet, 100);
+      wet = LPF.ar(wet, 9000);
 
       Out.ar(out, dry + (wet * mix));
     }).add;
 
     context.server.sync;
 
-    // ── instantiate voices ───────────────────────
     voices = Array.fill(4, {
       Synth(\tessera_voice, [
         \out, reverbBus, \delayOut, delayBus
@@ -155,7 +151,6 @@ Engine_Tessera : CroneEngine {
       \in, reverbBus, \out, context.out_b
     ]);
 
-    // ── voice commands ───────────────────────────
     this.addCommand("hz",       "if", { |msg| voices[msg[1].asInteger].set(\freq, msg[2]) });
     this.addCommand("amp",      "if", { |msg| voices[msg[1].asInteger].set(\amp, msg[2]) });
     this.addCommand("gate",     "ii", { |msg| voices[msg[1].asInteger].set(\t_gate, msg[2]) });
@@ -178,7 +173,6 @@ Engine_Tessera : CroneEngine {
     this.addCommand("delay_send", "if", { |msg| voices[msg[1].asInteger].set(\delaySend, msg[2]) });
     this.addCommand("accent",   "if", { |msg| voices[msg[1].asInteger].set(\accent, msg[2]) });
 
-    // ── FX commands ──────────────────────────────
     this.addCommand("delay_time",     "f", { |msg| delaySynth.set(\time, msg[1]) });
     this.addCommand("delay_feedback", "f", { |msg| delaySynth.set(\feedback, msg[1]) });
     this.addCommand("delay_color",    "f", { |msg| delaySynth.set(\color, msg[1]) });

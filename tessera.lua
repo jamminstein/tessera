@@ -25,6 +25,7 @@ engine.name = "Tessera"
 local musicutil = require "musicutil"
 local Repetitor = include "lib/repetitor"
 local Ziggurat = include "lib/ziggurat"
+local Explorer = include "lib/explorer"
 
 ----------------------------------------------------------------
 -- state
@@ -48,6 +49,7 @@ local key3_held = false
 local grid_held = nil        -- {ch=, step=, type="rhythm"|"pitch"}
 local frozen = false         -- performance freeze active
 local freeze_release_clock = nil
+local explorer = nil         -- autonomous bandmate
 
 local active_notes = {{}, {}, {}, {}}
 
@@ -63,18 +65,22 @@ local VOICE_PARAMS = {
 }
 
 local CH_PRESETS = {
-  {saw=0.7, pulse=0.0, sub=0.0, noise=0.0,
-   detune=0.12, drive=0.4, cutoff=3500, res=0.25, env_mod=0.5,
-   drift=0.12, decay=0.4, release=0.3, amp=0.55, pan=-0.35, delay_send=0.3},
-  {saw=0.3, pulse=0.0, sub=0.8, noise=0.0,
-   detune=0.05, drive=0.7, cutoff=600, res=0.4, env_mod=0.7,
-   drift=0.08, decay=0.25, release=0.15, amp=0.6, pan=0.0, delay_send=0.1},
-  {saw=0.0, pulse=0.6, sub=0.0, noise=0.4,
-   detune=0.0, drive=0.5, cutoff=2000, res=0.55, env_mod=0.9,
-   drift=0.06, decay=0.1, release=0.08, amp=0.5, pan=0.4, delay_send=0.35},
-  {saw=0.4, pulse=0.0, sub=0.2, noise=0.5,
-   detune=0.2, drive=0.2, cutoff=2500, res=0.15, env_mod=0.2,
-   drift=0.3, decay=1.5, release=1.0, amp=0.4, pan=-0.2, delay_send=0.45},
+  -- ch1: bright lead — detuned saws, open filter, wide stereo right
+  {saw=0.8, pulse=0.0, sub=0.0, noise=0.0,
+   detune=0.3, drive=0.5, cutoff=4500, res=0.35, env_mod=0.6,
+   drift=0.2, decay=0.5, release=0.4, amp=0.6, pan=-0.6, delay_send=0.35},
+  -- ch2: DEEP bass — sub + saw, very low cutoff, heavy drive, center
+  {saw=0.4, pulse=0.0, sub=1.0, noise=0.0,
+   detune=0.03, drive=1.2, cutoff=350, res=0.5, env_mod=0.8,
+   drift=0.04, decay=0.35, release=0.2, amp=0.75, pan=0.0, delay_send=0.05},
+  -- ch3: drum/perc — pulse + noise, tight, resonant, punchy
+  {saw=0.0, pulse=0.8, sub=0.3, noise=0.6,
+   detune=0.0, drive=0.8, cutoff=1500, res=0.7, env_mod=1.0,
+   drift=0.03, decay=0.08, release=0.05, amp=0.65, pan=0.5, delay_send=0.25},
+  -- ch4: texture — saw + noise, long tail, wide left, lots of delay
+  {saw=0.5, pulse=0.3, sub=0.0, noise=0.7,
+   detune=0.5, drive=0.3, cutoff=3000, res=0.2, env_mod=0.3,
+   drift=0.5, decay=2.0, release=1.5, amp=0.45, pan=0.6, delay_send=0.55},
 }
 
 local CH_LABELS = {"LEAD", "BASS", "PERC", "WASH"}
@@ -89,6 +95,7 @@ local FX_PARAMS = {"delay_time", "delay_feedback", "delay_color", "delay_mix",
 function init()
   rep = Repetitor.new()
   zig = Ziggurat.new()
+  explorer = Explorer.new(rep, zig)
 
   params:add_separator("TESSERA")
 
@@ -138,6 +145,15 @@ function init()
   params:add_control("xmod_amount", "xmod amount",
     controlspec.new(0, 1, 'lin', 0.01, 0.3))
   params:set_action("xmod_amount", function(v) zig.xmod_amount = v end)
+
+  -- explorer (autonomous bandmate)
+  params:add_separator("EXPLORER")
+  params:add_option("explorer_active", "bandmate", {"off", "on"}, 2)
+  params:set_action("explorer_active", function(v) explorer.active = v == 2 end)
+
+  params:add_control("explorer_intensity", "intensity",
+    controlspec.new(0, 1, 'lin', 0.01, 0.5))
+  params:set_action("explorer_intensity", function(v) explorer.intensity = v end)
 
   -- per-channel voice params
   for ch = 1, 4 do
@@ -277,6 +293,18 @@ function step_clock()
     if playing and not frozen then
       -- update harmonic drift once per master step
       zig:update_drift()
+
+      -- explorer autonomous mutations
+      local voice_changes = explorer:step()
+      if voice_changes then
+        for _, change in ipairs(voice_changes) do
+          local pkey, action, val = change[1], change[2], change[3]
+          if params.lookup[pkey] then
+            if action == "delta" then params:delta(pkey, val)
+            else params:set(pkey, val) end
+          end
+        end
+      end
 
       for ch = 1, 4 do
         local hit, accent, ratch = rep:advance(ch)
@@ -531,7 +559,13 @@ function redraw()
   -- footer
   screen.level(3)
   screen.move(1, 63)
+  if explorer.active then
+    screen.level(8)
+    screen.text(explorer:get_phase_name())
+    screen.level(3)
+  end
   if zig.drift_enabled then
+    screen.move(50, 63)
     local drift_st = string.format("%+.1f", zig.drift_amount)
     screen.text("drft " .. drift_st)
   end
