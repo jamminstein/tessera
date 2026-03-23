@@ -642,11 +642,17 @@ function enc(n, d)
         c.chain[grid_held.step] = new
       end
     elseif page == 1 then
-      -- E3 on play page: BPM (or division with K3 held)
+      -- E3 on play page: main param per channel (K3: BPM/division)
       if key3_held then
-        params:delta("division", d)
-      else
         params:delta("bpm", d)
+      else
+        -- control the key tone param for selected channel
+        local mode_idx = params:get("ch" .. sel_ch .. "_mode")
+        if mode_idx == 1 then
+          params:delta("ch" .. sel_ch .. "_cutoff", d)
+        else
+          params:delta("ch" .. sel_ch .. "_peak1", d)
+        end
       end
     elseif page == 2 then
       -- E3 on rhythm page: pulses/offset
@@ -841,22 +847,45 @@ function draw_play()
     screen.text(name)
 
     -- mode indicator
-    local mode_str = MODE_NAMES[params:get("ch" .. ch .. "_mode")]
+    local mode_idx = params:get("ch" .. ch .. "_mode")
     screen.level(is_sel and 7 or 3)
     screen.move(86, y + 8)
-    screen.text(mode_str:sub(1,4))
+    screen.text(mode_idx == 1 and "ANLG" or "SPEC")
 
-    -- division / playing indicator
-    if playing and not c.muted then
-      screen.level(is_sel and 10 or 4)
-      screen.move(110, y + 8)
-      screen.text(rep:get_mode_name(ch))
-    elseif c.muted then
+    -- key param value (what E3 controls)
+    local mode_idx = params:get("ch" .. ch .. "_mode")
+    if is_sel then
+      screen.level(12)
+      screen.move(104, y + 8)
+      if mode_idx == 1 then
+        screen.text_right(string.format("%.0f", params:get("ch" .. ch .. "_cutoff")))
+      else
+        screen.text_right(string.format("%.0f", params:get("ch" .. ch .. "_peak1")))
+      end
+    end
+
+    -- mute indicator
+    if c.muted then
       screen.level(2)
-      screen.move(110, y + 8)
-      screen.text("mute")
+      screen.move(108, y + 8)
+      screen.text("x")
+    end
+
+    -- playhead dot
+    if playing and not c.muted then
+      screen.level(15)
+      screen.rect(126, y + 3, 2, 2)
+      screen.fill()
     end
   end
+
+  -- footer: BPM + division
+  screen.level(8)
+  screen.move(1, 63)
+  screen.text("E3:" .. (key3_held and "BPM" or "filter"))
+  screen.level(5)
+  screen.move(128, 63)
+  screen.text_right(params:get("bpm") .. " " .. DIV_NAMES[params:get("division")])
 end
 
 ----------------------------------------------------------------
