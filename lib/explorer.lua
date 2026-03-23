@@ -63,16 +63,16 @@ function Explorer:step()
   end
 end
 
--- returns list of {param_key, value} pairs for Lua to apply via params:set
+-- returns list of {param_key, action, value} triples for Lua to apply via params
 function Explorer:mutate_voice()
   local changes = {}
   local ch = math.random(1, 4)
   local roll = math.random()
 
   if roll < 0.3 * self.intensity then
-    -- mutate filter cutoff (stay musical: move by ratio, not absolute)
-    local mult = 1 + (math.random() - 0.5) * self.intensity
-    table.insert(changes, {"ch" .. ch .. "_cutoff", "delta", math.random(-8, 8)})
+    -- mutate filter peak frequencies
+    local peak = math.random(1, 2) == 1 and "peak1" or "peak2"
+    table.insert(changes, {"ch" .. ch .. "_" .. peak, "delta", math.random(-8, 8)})
   end
 
   if roll < 0.5 * self.intensity then
@@ -91,10 +91,10 @@ function Explorer:mutate_voice()
   end
 
   if roll < 0.15 * self.intensity then
-    -- swap oscillator levels occasionally
-    local sources = {"saw", "pulse", "sub", "noise"}
-    local src = sources[math.random(1, 4)]
-    table.insert(changes, {"ch" .. ch .. "_" .. src, "delta", math.random(-3, 3)})
+    -- shift spectral params: tilt, spread, or partials
+    local spectral = {"tilt", "spread", "peak_spread"}
+    local sp = spectral[math.random(1, #spectral)]
+    table.insert(changes, {"ch" .. ch .. "_" .. sp, "delta", math.random(-3, 3)})
   end
 
   return changes
