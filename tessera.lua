@@ -56,6 +56,71 @@ local DIV_NAMES = {"1/4", "1/8", "1/16", "1/32"}
 
 local MODE_NAMES = {"analog", "spectral"}
 
+----------------------------------------------------------------
+-- LFO modulation state
+----------------------------------------------------------------
+
+local lfo_phases = {0, 0, 0, 0}
+local lfo_base_values = {} -- stores user's base param values per channel
+local LFO_FPS = 30
+
+-- destination options per mode
+local LFO_DEST_ANALOG = {"cutoff", "drive", "res", "decay", "pan", "amp", "delay_send"}
+local LFO_DEST_SPECTRAL = {"peak1", "peak2", "spread", "tilt", "pan", "amp", "delay_send"}
+
+-- default LFO settings per channel {rate, depth, dest_name}
+local LFO_DEFAULTS = {
+  {rate = 0.08, depth = 0.4, dest = "cutoff"},   -- CH1 ACID
+  {rate = 0.05, depth = 0.2, dest = "drive"},     -- CH2 KICK
+  {rate = 0.12, depth = 0.5, dest = "peak1"},     -- CH3 NOISE
+  {rate = 0.03, depth = 0.6, dest = "spread"},    -- CH4 DARK
+}
+
+-- modulation ranges per destination
+local LFO_MOD_RANGES = {
+  cutoff     = {type = "exp", range = 1.0},     -- multiply by 2^(mod*range), ±50%
+  drive      = {type = "lin", range = 0.5},
+  res        = {type = "lin", range = 0.2},
+  peak1      = {type = "exp", range = 1.0},     -- ±50%
+  peak2      = {type = "exp", range = 1.0},
+  spread     = {type = "lin", range = 0.3},
+  tilt       = {type = "lin", range = 0.8},
+  pan        = {type = "lin", range = 0.3},
+  amp        = {type = "lin", range = 0.15},
+  decay      = {type = "lin", range = 0.3},
+  delay_send = {type = "lin", range = 0.2},
+}
+
+-- engine command lookup (maps param suffix to engine function + needs ch arg)
+local ENGINE_COMMANDS = {
+  cutoff     = function(ch, v) engine.cutoff(ch, v) end,
+  drive      = function(ch, v) engine.drive(ch, v) end,
+  res        = function(ch, v) engine.res(ch, v) end,
+  peak1      = function(ch, v) engine.peak1(ch, v) end,
+  peak2      = function(ch, v) engine.peak2(ch, v) end,
+  spread     = function(ch, v) engine.spread(ch, v) end,
+  tilt       = function(ch, v) engine.tilt(ch, v) end,
+  pan        = function(ch, v) engine.pan(ch, v) end,
+  amp        = function(ch, v) engine.amp(ch, v) end,
+  decay      = function(ch, v) engine.dec(ch, v) end,
+  delay_send = function(ch, v) engine.delay_send(ch, v) end,
+}
+
+-- safe clamping ranges per destination
+local LFO_CLAMP = {
+  cutoff     = {min = 40, max = 18000},
+  drive      = {min = 0, max = 2.0},
+  res        = {min = 0, max = 0.95},
+  peak1      = {min = 40, max = 8000},
+  peak2      = {min = 40, max = 12000},
+  spread     = {min = 0, max = 1.0},
+  tilt       = {min = 0, max = 3.0},
+  pan        = {min = -1, max = 1},
+  amp        = {min = 0, max = 1.0},
+  decay      = {min = 0.01, max = 4.0},
+  delay_send = {min = 0, max = 1.0},
+}
+
 local CH_PRESETS = {
   -- ch1: ACID -- analog mode, 303-style acid
   {mode=0,
@@ -201,6 +266,68 @@ local SPECTRAL_VOICE = {
 local function voice_param_list()
   local m = params:get("ch" .. sel_ch .. "_mode")
   return m == 1 and ANALOG_VOICE or SPECTRAL_VOICE
+end
+
+----------------------------------------------------------------
+-- LFO modulation functions
+----------------------------------------------------------------
+
+-- get the destination list for a channel based on its mode
+local function lfo_dest_list(ch)
+  local m = params:get("ch" .. ch .. "_mode")
+  return m == 1 and LFO_DEST_ANALOG or LFO_DEST_SPECTRAL
+end
+
+-- update the base value for a channel's current LFO destination
+local function update_lfo_base(ch)
+  local dest_idx = params:get("ch" .. ch .. "_lfo_dest")
+  local dests = lfo_dest_list(ch)
+  local dest_name = dests[dest_idx]
+  if dest_name then
+    local pkey = "ch" .. ch .. "_" .. dest_name
+    if params.lookup[pkey] then
+      lfo_base_values[ch] = params:get(pkey)
+    end
+  end
+end
+
+-- apply LFO modulation to the destination param via direct engine calls
+local function apply_lfo_mod(ch, mod)
+  local dest_idx = params:get("ch" .. ch .. "_lfo_dest")
+  local dests = lfo_dest_list(ch)
+  local dest_name = dests[dest_idx]
+  if not dest_name then return end
+
+  local base = lfo_base_values[ch]
+  if not base then
+    update_lfo_base(ch)
+    base = lfo_base_values[ch]
+    if not base then return end
+  end
+
+  local mr = LFO_MOD_RANGES[dest_name]
+  if not mr then return end
+
+  local modulated
+  if mr.type == "exp" then
+    -- exponential: multiply base by 2^(mod * range)
+    modulated = base * (2 ^ (mod * mr.range))
+  else
+    -- linear: add offset scaled by range
+    modulated = base + mod * mr.range
+  end
+
+  -- clamp to safe range
+  local cl = LFO_CLAMP[dest_name]
+  if cl then
+    modulated = util.clamp(modulated, cl.min, cl.max)
+  end
+
+  -- send directly to engine (0-indexed channel)
+  local cmd = ENGINE_COMMANDS[dest_name]
+  if cmd then
+    cmd(ch - 1, modulated)
+  end
 end
 
 ----------------------------------------------------------------
@@ -428,6 +555,22 @@ function init()
     params:add_control("ch" .. ch .. "_pan", "pan",
       controlspec.new(-1, 1, 'lin', 0.01, pre.pan))
     params:set_action("ch" .. ch .. "_pan", function(v) engine.pan(ch - 1, v) end)
+
+    -- LFO per channel
+    local lfo_def = LFO_DEFAULTS[ch]
+    -- build combined dest list for param option (union of both mode lists)
+    local all_dests = {"cutoff", "drive", "res", "decay", "pan", "amp", "delay_send", "peak1", "peak2", "spread", "tilt"}
+    local default_dest_idx = 1
+    for di, dn in ipairs(all_dests) do
+      if dn == lfo_def.dest then default_dest_idx = di; break end
+    end
+    params:add_separator("CH " .. ch .. " LFO")
+    params:add_control("ch" .. ch .. "_lfo_rate", "lfo rate",
+      controlspec.new(0.02, 0.5, 'exp', 0.01, lfo_def.rate, "hz"))
+    params:add_control("ch" .. ch .. "_lfo_depth", "lfo depth",
+      controlspec.new(0, 1, 'lin', 0.01, lfo_def.depth))
+    params:add_option("ch" .. ch .. "_lfo_dest", "lfo dest", all_dests, default_dest_idx)
+    params:set_action("ch" .. ch .. "_lfo_dest", function(v) update_lfo_base(ch) end)
   end
 
   -- FX
@@ -470,8 +613,19 @@ function init()
   end
   params:add_option("midi_enabled", "midi out", {"off", "on"}, 1)
 
+  -- MODULATION
+  params:add_separator("MODULATION")
+  params:add_option("macro_drift", "macro drift", {"off", "on"}, 2)
+  params:add_control("macro_drift_speed", "drift speed",
+    controlspec.new(0.01, 0.1, 'exp', 0.001, 0.03))
+
   midi_out = midi.connect(params:get("midi_device"))
   params:bang()
+
+  -- initialize LFO base values after params:bang()
+  for ch = 1, 4 do
+    update_lfo_base(ch)
+  end
 
   -- main sequencer
   clock.run(step_clock)
@@ -485,6 +639,39 @@ function init()
       clock.sleep(1/15)
       if screen_dirty then redraw(); screen_dirty = false end
       if grid_dirty then grid_redraw(); grid_dirty = false end
+    end
+  end)
+
+  -- LFO + macro drift modulation clock
+  clock.run(function()
+    while true do
+      clock.sleep(1 / LFO_FPS)
+      if playing then
+        -- per-channel LFOs
+        for ch = 1, 4 do
+          local rate = params:get("ch" .. ch .. "_lfo_rate")
+          local depth = params:get("ch" .. ch .. "_lfo_depth")
+          if depth > 0.01 then
+            lfo_phases[ch] = (lfo_phases[ch] + (rate * 2 * math.pi / LFO_FPS)) % (2 * math.pi)
+            local mod = math.sin(lfo_phases[ch]) * depth
+            apply_lfo_mod(ch, mod)
+          end
+        end
+
+        -- macro drift (slow random walk)
+        if params:get("macro_drift") == 2 then
+          local speed = params:get("macro_drift_speed")
+          for i = 1, 4 do
+            local cur = macro_values[i]
+            local delta = (math.random() - 0.5) * speed * 2
+            local new_val = util.clamp(cur + delta, 0, 0.7)
+            macro_values[i] = new_val
+            macro_fns[i](new_val)
+          end
+        end
+
+        screen_dirty = true
+      end
     end
   end)
 end
@@ -653,6 +840,7 @@ function enc(n, d)
         else
           params:delta("ch" .. sel_ch .. "_peak1", d)
         end
+        update_lfo_base(sel_ch)
       end
     elseif page == 2 then
       -- E3 on rhythm page: pulses/offset
@@ -674,6 +862,7 @@ function enc(n, d)
       if p then
         local pkey = "ch" .. sel_ch .. "_" .. p.key
         if params.lookup[pkey] then params:delta(pkey, d) end
+        update_lfo_base(sel_ch)
       end
     elseif page == 4 then
       -- E3 on macro page: adjust macro or FX param
@@ -875,6 +1064,15 @@ function draw_play()
     if playing and not c.muted then
       screen.level(15)
       screen.rect(126, y + 3, 2, 2)
+      screen.fill()
+    end
+
+    -- LFO indicator dot (bobs up/down with LFO phase)
+    local lfo_depth = params:get("ch" .. ch .. "_lfo_depth")
+    if lfo_depth > 0.01 then
+      local lfo_y = y + 4 + math.sin(lfo_phases[ch]) * 3
+      screen.level(7)
+      screen.rect(121, lfo_y, 2, 2)
       screen.fill()
     end
   end
@@ -1111,6 +1309,13 @@ function draw_macro()
     screen.level(is_sel and 10 or 4)
     screen.move(100, y + 6)
     screen.text(math.floor(macro_values[i] * 100) .. "%")
+
+    -- drift indicator
+    if params:get("macro_drift") == 2 then
+      screen.level(5)
+      screen.move(122, y + 6)
+      screen.text("~")
+    end
   end
 
   -- divider
