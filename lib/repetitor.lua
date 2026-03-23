@@ -3,6 +3,7 @@
 -- inspired by Noise Engineering Multi Repetitor
 --
 -- modes: euclidean, fibonacci, prime, golden ratio, + traditional patterns
+-- per-step: ratchets (1-4x repeats), probability (0-100%)
 -- per-channel: steps, pulses, offset, accent generation
 
 local Repetitor = {}
@@ -119,14 +120,12 @@ local TRADITIONAL = {
 
 ----------------------------------------------------------------
 -- accent generation
--- downbeats get full accent, other hits get softer accents
 ----------------------------------------------------------------
 
 local function generate_accents(pattern)
   local accents = {}
   for i = 1, #pattern do
     if pattern[i] == 1 then
-      -- downbeat positions (1, 5, 9, 13) get full accent
       accents[i] = ((i - 1) % 4 == 0) and 1.0 or 0.65
     else
       accents[i] = 0
@@ -144,15 +143,25 @@ function Repetitor.new()
   self.channels = {}
   for i = 1, 4 do
     self.channels[i] = {
-      mode = 1,       -- 1=euclidean 2=fib 3=prime 4=golden 5+=traditional
+      mode = 1,
       steps = 16,
       pulses = 4,
       offset = 0,
       pattern = {},
       accents = {},
+      ratchets = {},    -- per-step ratchet count (1=normal, 2-4=repeats)
+      probability = {}, -- per-step probability 0-100
       position = 0,
       muted = false,
+      -- ratchet playback state
+      ratchet_remaining = 0,
+      ratchet_accent = 0,
     }
+    -- init ratchets and probability
+    for s = 1, 16 do
+      self.channels[i].ratchets[s] = 1
+      self.channels[i].probability[s] = 100
+    end
   end
   -- set varied defaults
   self.channels[1].pulses = 4
@@ -178,7 +187,6 @@ function Repetitor:regenerate(ch)
   elseif c.mode == 4 then
     raw = golden_pattern(c.steps)
   else
-    -- traditional pattern
     local tidx = c.mode - 4
     if tidx >= 1 and tidx <= #TRADITIONAL then
       raw = {}
@@ -204,21 +212,62 @@ function Repetitor:regenerate(ch)
   c.accents = generate_accents(raw)
 end
 
--- advance one step, return (hit, accent)
+-- advance one step, return (hit, accent, ratchet_count)
+-- ratchet_count > 1 means the caller should schedule sub-triggers
 function Repetitor:advance(ch)
   local c = self.channels[ch]
+
+  -- if we're in the middle of a ratchet burst, emit a sub-trigger
+  if c.ratchet_remaining > 0 then
+    c.ratchet_remaining = c.ratchet_remaining - 1
+    return true, c.ratchet_accent * 0.7, 0  -- softer sub-hits
+  end
+
   c.position = (c.position % c.steps) + 1
-  if c.muted then return false, 0 end
+  if c.muted then return false, 0, 0 end
+
   local hit = c.pattern[c.position] == 1
+  if not hit then return false, 0, 0 end
+
+  -- probability check
+  local prob = c.probability[c.position] or 100
+  if prob < 100 and math.random(100) > prob then
+    return false, 0, 0
+  end
+
   local accent = c.accents[c.position] or 0.65
-  return hit, accent
+  local ratch = c.ratchets[c.position] or 1
+
+  -- queue ratchet sub-triggers (they fire on subsequent advance calls)
+  if ratch > 1 then
+    c.ratchet_remaining = ratch - 1
+    c.ratchet_accent = accent
+  end
+
+  return true, accent, ratch
+end
+
+-- set ratchet count for a step (1-4)
+function Repetitor:set_ratchet(ch, step, count)
+  count = math.max(1, math.min(4, count))
+  self.channels[ch].ratchets[step] = count
+end
+
+-- set probability for a step (0-100)
+function Repetitor:set_probability(ch, step, prob)
+  prob = math.max(0, math.min(100, prob))
+  self.channels[ch].probability[step] = prob
 end
 
 function Repetitor:reset(ch)
   if ch then
     self.channels[ch].position = 0
+    self.channels[ch].ratchet_remaining = 0
   else
-    for i = 1, 4 do self.channels[i].position = 0 end
+    for i = 1, 4 do
+      self.channels[i].position = 0
+      self.channels[i].ratchet_remaining = 0
+    end
   end
 end
 

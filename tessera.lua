@@ -9,10 +9,16 @@
 -- E2: select channel or param
 -- E3: adjust value
 -- K2: play/stop
--- K3: hold for secondary
+-- K3: performance freeze (hold)
+--     on rhythm page: hold grid step + E3 = ratchet
+--     on pitch page: hold grid step + E3 = edit note
 --
 -- grid top 4 rows: rhythm steps
+--   brightness = probability (dim=maybe)
+--   hold step + E3 = set ratchet (1-4x)
+--   K3 + tap step = cycle probability
 -- grid bottom 4 rows: pitch chain
+--   hold step + E3 = edit pitch
 
 engine.name = "Tessera"
 
@@ -39,7 +45,9 @@ local screen_dirty = true
 local grid_dirty = true
 
 local key3_held = false
-local grid_held = nil
+local grid_held = nil        -- {ch=, step=, type="rhythm"|"pitch"}
+local frozen = false         -- performance freeze active
+local freeze_release_clock = nil
 
 local active_notes = {{}, {}, {}, {}}
 
@@ -47,7 +55,6 @@ local NOTE_NAMES = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"}
 local DIVISIONS = {1/4, 1/8, 1/16, 1/32}
 local DIV_NAMES = {"1/4", "1/8", "1/16", "1/32"}
 
--- voice params for E2/E3 editing on voice page
 local VOICE_PARAMS = {
   "saw", "pulse", "sub", "noise",
   "detune", "drive", "cutoff", "res",
@@ -55,27 +62,25 @@ local VOICE_PARAMS = {
   "amp", "delay_send"
 }
 
--- channel presets — each voice has real character
 local CH_PRESETS = {
-  -- ch1: bright lead — dual saw, moderate filter, some drive
   {saw=0.7, pulse=0.0, sub=0.0, noise=0.0,
    detune=0.12, drive=0.4, cutoff=3500, res=0.25, env_mod=0.5,
-   drift=0.12, decay=0.4, release=0.3, amp=0.28, pan=-0.35, delay_send=0.3},
-  -- ch2: fat bass — sub + saw, low cutoff, high drive
+   drift=0.12, decay=0.4, release=0.3, amp=0.55, pan=-0.35, delay_send=0.3},
   {saw=0.3, pulse=0.0, sub=0.8, noise=0.0,
    detune=0.05, drive=0.7, cutoff=600, res=0.4, env_mod=0.7,
-   drift=0.08, decay=0.25, release=0.15, amp=0.35, pan=0.0, delay_send=0.1},
-  -- ch3: percussive — pulse + noise, tight envelope, resonant
+   drift=0.08, decay=0.25, release=0.15, amp=0.6, pan=0.0, delay_send=0.1},
   {saw=0.0, pulse=0.6, sub=0.0, noise=0.4,
    detune=0.0, drive=0.5, cutoff=2000, res=0.55, env_mod=0.9,
-   drift=0.06, decay=0.1, release=0.08, amp=0.25, pan=0.4, delay_send=0.35},
-  -- ch4: pad wash — saw + noise, long decay, drifty
+   drift=0.06, decay=0.1, release=0.08, amp=0.5, pan=0.4, delay_send=0.35},
   {saw=0.4, pulse=0.0, sub=0.2, noise=0.5,
    detune=0.2, drive=0.2, cutoff=2500, res=0.15, env_mod=0.2,
-   drift=0.3, decay=1.5, release=1.0, amp=0.18, pan=-0.2, delay_send=0.45},
+   drift=0.3, decay=1.5, release=1.0, amp=0.4, pan=-0.2, delay_send=0.45},
 }
 
 local CH_LABELS = {"LEAD", "BASS", "PERC", "WASH"}
+
+local FX_PARAMS = {"delay_time", "delay_feedback", "delay_color", "delay_mix",
+                    "halo", "reverb_mix", "reverb_size"}
 
 ----------------------------------------------------------------
 -- init
@@ -105,6 +110,34 @@ function init()
   params:set_action("scale", function(v)
     zig:set_scale(params:get("root") - 1, v)
   end)
+
+  -- harmonic drift
+  params:add_separator("DRIFT")
+  params:add_option("drift_enabled", "harmonic drift", {"off", "on"}, 2)
+  params:set_action("drift_enabled", function(v) zig.drift_enabled = v == 2 end)
+
+  params:add_control("drift_speed", "drift speed",
+    controlspec.new(0.001, 0.1, 'exp', 0.001, 0.02))
+  params:set_action("drift_speed", function(v) zig.drift_speed = v end)
+
+  params:add_control("drift_range", "drift range",
+    controlspec.new(1, 12, 'lin', 1, 7, "st"))
+  params:set_action("drift_range", function(v) zig.drift_range = v end)
+
+  -- cross-channel modulation
+  params:add_separator("XMOD")
+  params:add_option("xmod_enabled", "cross-mod", {"off", "on"}, 1)
+  params:set_action("xmod_enabled", function(v) zig.xmod_enabled = v == 2 end)
+
+  params:add_number("xmod_source", "xmod source ch", 1, 4, 1)
+  params:set_action("xmod_source", function(v) zig.xmod_source = v end)
+
+  params:add_number("xmod_target", "xmod target ch", 1, 4, 3)
+  params:set_action("xmod_target", function(v) zig.xmod_target = v end)
+
+  params:add_control("xmod_amount", "xmod amount",
+    controlspec.new(0, 1, 'lin', 0.01, 0.3))
+  params:set_action("xmod_amount", function(v) zig.xmod_amount = v end)
 
   -- per-channel voice params
   for ch = 1, 4 do
@@ -215,8 +248,13 @@ function init()
   midi_out = midi.connect(params:get("midi_device"))
   params:bang()
 
+  -- main sequencer
   clock.run(step_clock)
 
+  -- ratchet sub-clock (runs at 4x division for ratchet bursts)
+  clock.run(ratchet_clock)
+
+  -- screen/grid refresh
   clock.run(function()
     while true do
       clock.sleep(1/15)
@@ -230,30 +268,34 @@ end
 -- sequencer
 ----------------------------------------------------------------
 
+-- pending ratchets: {ch, freq, accent, remaining, slew}
+local ratchet_queue = {}
+
 function step_clock()
   while true do
     clock.sync(DIVISIONS[params:get("division")])
-    if playing then
+    if playing and not frozen then
+      -- update harmonic drift once per master step
+      zig:update_drift()
+
       for ch = 1, 4 do
-        local hit, accent = rep:advance(ch)
+        local hit, accent, ratch = rep:advance(ch)
         if hit then
           local note = zig:advance(ch)
           local freq = musicutil.note_num_to_freq(note)
           local slew = zig.channels[ch].slew
 
-          engine.slew(ch - 1, slew)
-          engine.hz(ch - 1, freq)
-          engine.accent(ch - 1, accent)
-          engine.gate(ch - 1, 1)
+          trigger_voice(ch, freq, accent, slew, note)
 
-          if params:get("midi_enabled") == 2 and midi_out then
-            local midi_ch = params:get("midi_ch_" .. ch)
-            for _, n in ipairs(active_notes[ch]) do
-              midi_out:note_off(n, 0, midi_ch)
-            end
-            local vel = util.clamp(math.floor(accent * 127), 1, 127)
-            midi_out:note_on(note, vel, midi_ch)
-            active_notes[ch] = {note}
+          -- queue ratchet sub-hits
+          if ratch and ratch > 1 then
+            ratchet_queue[ch] = {
+              freq = freq,
+              accent = accent * 0.7,
+              remaining = ratch - 1,
+              slew = slew,
+              note = note,
+            }
           end
         end
       end
@@ -261,6 +303,67 @@ function step_clock()
       grid_dirty = true
     end
   end
+end
+
+function ratchet_clock()
+  while true do
+    -- run at 4x the main division for sub-triggers
+    clock.sync(DIVISIONS[params:get("division")] / 4)
+    if playing and not frozen then
+      for ch = 1, 4 do
+        local r = ratchet_queue[ch]
+        if r and r.remaining > 0 then
+          trigger_voice(ch, r.freq, r.accent, r.slew, r.note)
+          r.remaining = r.remaining - 1
+          r.accent = r.accent * 0.85  -- each sub-hit softer
+          if r.remaining <= 0 then
+            ratchet_queue[ch] = nil
+          end
+        end
+      end
+    end
+  end
+end
+
+function trigger_voice(ch, freq, accent, slew, note)
+  engine.slew(ch - 1, slew)
+  engine.hz(ch - 1, freq)
+  engine.accent(ch - 1, accent)
+  engine.gate(ch - 1, 1)
+
+  if params:get("midi_enabled") == 2 and midi_out then
+    local midi_ch = params:get("midi_ch_" .. ch)
+    for _, n in ipairs(active_notes[ch]) do
+      midi_out:note_off(n, 0, midi_ch)
+    end
+    local vel = util.clamp(math.floor(accent * 127), 1, 127)
+    midi_out:note_on(note, vel, midi_ch)
+    active_notes[ch] = {note}
+  end
+end
+
+----------------------------------------------------------------
+-- performance freeze
+----------------------------------------------------------------
+
+function enter_freeze()
+  frozen = true
+  -- retrigger all voices with long decay for sustained freeze
+  for ch = 1, 4 do
+    local note = zig.channels[ch].last_note
+    local freq = musicutil.note_num_to_freq(note)
+    engine.slew(ch - 1, 0.5)
+    engine.hz(ch - 1, freq)
+    engine.accent(ch - 1, 0.6)
+    engine.gate(ch - 1, 1)
+  end
+  screen_dirty = true
+end
+
+function release_freeze()
+  frozen = false
+  ratchet_queue = {}
+  screen_dirty = true
 end
 
 ----------------------------------------------------------------
@@ -275,17 +378,26 @@ function enc(n, d)
     if page == 3 then
       sel_param = util.clamp(sel_param + d, 1, #VOICE_PARAMS)
     elseif page == 4 then
-      sel_param = util.clamp(sel_param + d, 1, 7)
+      sel_param = util.clamp(sel_param + d, 1, #FX_PARAMS)
     else
       sel_ch = util.clamp(sel_ch + d, 1, 4)
     end
   elseif n == 3 then
     if grid_held then
-      local c = zig.channels[grid_held.ch]
-      local cur = c.chain[grid_held.step] or 60
-      local new = util.clamp(cur + d, c.range_lo, c.range_hi)
-      new = zig:quantize(new)
-      c.chain[grid_held.step] = new
+      if grid_held.type == "rhythm" then
+        -- hold rhythm step + E3 = set ratchet count
+        local c = rep.channels[grid_held.ch]
+        local cur = c.ratchets[grid_held.step] or 1
+        local new = util.clamp(cur + d, 1, 4)
+        rep:set_ratchet(grid_held.ch, grid_held.step, new)
+      elseif grid_held.type == "pitch" then
+        -- hold pitch step + E3 = edit note
+        local c = zig.channels[grid_held.ch]
+        local cur = c.chain[grid_held.step] or 60
+        local new = util.clamp(cur + d, c.range_lo, c.range_hi)
+        new = zig:quantize(new)
+        c.chain[grid_held.step] = new
+      end
     elseif page == 1 then enc_rhythm(d)
     elseif page == 2 then enc_pitch(d)
     elseif page == 3 then enc_voice(d)
@@ -325,9 +437,6 @@ function enc_voice(d)
   if params.lookup[pkey] then params:delta(pkey, d) end
 end
 
-local FX_PARAMS = {"delay_time", "delay_feedback", "delay_color", "delay_mix",
-                    "halo", "reverb_mix", "reverb_size"}
-
 function enc_fx(d)
   local pkey = FX_PARAMS[sel_param]
   if pkey and params.lookup[pkey] then params:delta(pkey, d) end
@@ -341,6 +450,8 @@ function key(n, z)
   if n == 2 and z == 1 then
     if playing then
       playing = false
+      frozen = false
+      ratchet_queue = {}
       all_notes_off()
       rep:reset()
       zig:reset()
@@ -349,6 +460,12 @@ function key(n, z)
     end
   elseif n == 3 then
     key3_held = z == 1
+    -- performance freeze: hold K3 = freeze, release = unfreeze
+    if z == 1 and playing then
+      enter_freeze()
+    elseif z == 0 and frozen then
+      release_freeze()
+    end
   end
   screen_dirty = true
 end
@@ -382,6 +499,14 @@ function redraw()
   screen.level(playing and 15 or 5)
   screen.move(1, 7)
   screen.text("TESSERA")
+
+  -- freeze indicator
+  if frozen then
+    screen.level(15)
+    screen.move(50, 7)
+    screen.text("FROZEN")
+  end
+
   screen.level(8)
   screen.move(128, 7)
   screen.text_right(PAGE_NAMES[page])
@@ -403,7 +528,13 @@ function redraw()
   elseif page == 4 then draw_fx()
   end
 
+  -- footer
   screen.level(3)
+  screen.move(1, 63)
+  if zig.drift_enabled then
+    local drift_st = string.format("%+.1f", zig.drift_amount)
+    screen.text("drft " .. drift_st)
+  end
   screen.move(128, 63)
   screen.text_right(params:string("bpm"))
 
@@ -425,10 +556,27 @@ function draw_rhythm()
     for i = 1, c.steps do
       local x = x0 + (i - 1) * w
       local is_play = (i == c.position and playing)
+      local prob = c.probability[i] or 100
+      local ratch = c.ratchets[i] or 1
+
       if c.pattern[i] == 1 then
-        screen.level(is_play and 15 or (is_sel and 10 or 5))
+        -- brightness reflects probability
+        local base_bright = is_sel and 10 or 5
+        if prob < 100 then
+          base_bright = math.max(2, math.floor(base_bright * prob / 100))
+        end
+        screen.level(is_play and 15 or base_bright)
         screen.rect(x, y + 1, w - 1, 6)
         screen.fill()
+
+        -- ratchet dots (small dots above step)
+        if ratch > 1 then
+          screen.level(is_sel and 12 or 6)
+          for r = 1, ratch - 1 do
+            screen.pixel(x + r - 1, y)
+            screen.fill()
+          end
+        end
       elseif is_play then
         screen.level(4)
         screen.rect(x, y + 1, w - 1, 6)
@@ -473,6 +621,13 @@ function draw_pitch()
     screen.move(116, y + 7)
     screen.text_right(zig:get_mode_name(ch))
   end
+
+  -- xmod indicator
+  if zig.xmod_enabled then
+    screen.level(6)
+    screen.move(1, 60)
+    screen.text("xmod " .. zig.xmod_source .. ">" .. zig.xmod_target)
+  end
 end
 
 function draw_voice()
@@ -480,7 +635,7 @@ function draw_voice()
   screen.move(50, 7)
   screen.text_right("CH" .. sel_ch .. " " .. CH_LABELS[sel_ch])
 
-  -- mixer bars for osc levels
+  -- mixer bars
   local bar_y = 14
   local sources = {"saw", "pulse", "sub", "noise"}
   for i, src in ipairs(sources) do
@@ -492,7 +647,6 @@ function draw_voice()
     screen.move(x, bar_y + 7)
     screen.text(src:sub(1, 3))
 
-    -- bar
     local bw = math.floor(v * 24)
     screen.level(is_sel and 12 or 5)
     screen.rect(x, bar_y + 9, bw, 3)
@@ -502,25 +656,31 @@ function draw_voice()
     screen.stroke()
   end
 
-  -- filter viz
+  -- filter curve
   local cut = params:get("ch" .. sel_ch .. "_cutoff")
   local r = params:get("ch" .. sel_ch .. "_res")
-  local cut_x = util.linlin(60, 12000, 4, 124, math.log(cut))
-  screen.level(8)
-  screen.move(4, 42)
+  local drv = params:get("ch" .. sel_ch .. "_drive")
+  screen.level(6)
   for x = 4, 124 do
-    local f = util.linexp(4, 124, 60, 12000, x)
-    local gain = 1 / (1 + ((f / cut) ^ 4))
-    if math.abs(f - cut) < cut * 0.15 then
+    local f = 60 * ((12000 / 60) ^ ((x - 4) / 120))
+    local ratio = f / cut
+    local gain = 1 / (1 + (ratio * ratio * ratio * ratio))
+    if ratio > 0.7 and ratio < 1.4 then
       gain = gain * (1 + r * 3)
     end
+    gain = math.min(gain, 1.4)
     local y = 42 - math.floor(gain * 12)
-    screen.line(x, y)
+    if x == 4 then screen.move(x, y) else screen.line(x, y) end
   end
-  screen.level(6)
   screen.stroke()
 
-  -- selected param readout
+  if drv > 0.1 then
+    screen.level(math.floor(util.linlin(0, 2, 3, 12, drv)))
+    screen.move(108, 38)
+    screen.text("drv " .. string.format("%.1f", drv))
+  end
+
+  -- selected param
   screen.level(10)
   screen.move(1, 60)
   local pname = VOICE_PARAMS[sel_param]
@@ -550,45 +710,78 @@ end
 
 g.key = function(x, y, z)
   if y >= 1 and y <= 4 then
+    local ch = y
+    local c = rep.channels[ch]
     if z == 1 then
-      local ch = y
-      local c = rep.channels[ch]
       if x >= 1 and x <= c.steps then
-        c.pattern[x] = c.pattern[x] == 1 and 0 or 1
-        if c.pattern[x] == 1 then
-          c.accents[x] = ((x - 1) % 4 == 0) and 1.0 or 0.65
+        if key3_held then
+          -- K3 + tap = cycle probability (100 -> 75 -> 50 -> 25 -> 100)
+          local cur = c.probability[x] or 100
+          if cur > 75 then c.probability[x] = 75
+          elseif cur > 50 then c.probability[x] = 50
+          elseif cur > 25 then c.probability[x] = 25
+          else c.probability[x] = 100 end
         else
-          c.accents[x] = 0
+          -- hold for ratchet editing via E3
+          grid_held = {ch = ch, step = x, type = "rhythm"}
+          -- if quick tap (released before next grid scan), toggle step
         end
       end
       sel_ch = ch; page = 1
+    else
+      -- release: if still held and no E3 turn happened, toggle step
+      if grid_held and grid_held.type == "rhythm" and grid_held.ch == ch and grid_held.step == x then
+        if not key3_held then
+          c.pattern[x] = c.pattern[x] == 1 and 0 or 1
+          if c.pattern[x] == 1 then
+            c.accents[x] = ((x - 1) % 4 == 0) and 1.0 or 0.65
+          else
+            c.accents[x] = 0
+          end
+        end
+        grid_held = nil
+      end
     end
+
   elseif y >= 5 and y <= 8 then
     local ch = y - 4
     local c = zig.channels[ch]
     if z == 1 then
       if x >= 1 and x <= c.chain_len then
-        grid_held = {ch = ch, step = x}
+        grid_held = {ch = ch, step = x, type = "pitch"}
         sel_ch = ch; page = 2
       elseif x == c.chain_len + 1 and c.chain_len < 16 then
         zig:set_chain_length(ch, c.chain_len + 1)
         sel_ch = ch; page = 2
       end
     else
-      if grid_held and grid_held.ch == ch then grid_held = nil end
+      if grid_held and grid_held.type == "pitch" and grid_held.ch == ch then
+        grid_held = nil
+      end
     end
   end
+
   screen_dirty = true; grid_dirty = true
 end
 
 function grid_redraw()
   g:all(0)
+
+  -- rhythm rows (1-4)
   for ch = 1, 4 do
     local c = rep.channels[ch]
     for x = 1, math.min(c.steps, 16) do
       local bright = 0
+      local prob = c.probability[x] or 100
+      local ratch = c.ratchets[x] or 1
+
       if c.pattern[x] == 1 then
-        bright = (x == c.position and playing) and 15 or 8
+        local base = 8
+        -- dim for low probability
+        if prob < 100 then base = math.max(3, math.floor(8 * prob / 100)) end
+        -- brighter for ratchets
+        if ratch > 1 then base = math.min(base + 2, 12) end
+        bright = (x == c.position and playing) and 15 or base
       else
         bright = (x == c.position and playing) and 4 or 0
       end
@@ -596,12 +789,14 @@ function grid_redraw()
       g:led(x, ch, bright)
     end
   end
+
+  -- pitch rows (5-8)
   for ch = 1, 4 do
     local c = zig.channels[ch]
     for x = 1, math.min(c.chain_len, 16) do
       local bright = 4
       if x == c.position and playing then bright = 15
-      elseif grid_held and grid_held.ch == ch and grid_held.step == x then bright = 12
+      elseif grid_held and grid_held.type == "pitch" and grid_held.ch == ch and grid_held.step == x then bright = 12
       else
         local note = c.chain[x] or 60
         bright = math.floor(util.linlin(24, 96, 3, 10, note))
@@ -610,6 +805,7 @@ function grid_redraw()
     end
     if c.chain_len < 16 then g:led(c.chain_len + 1, ch + 4, 2) end
   end
+
   g:refresh()
 end
 
@@ -619,5 +815,6 @@ end
 
 function cleanup()
   playing = false
+  frozen = false
   all_notes_off()
 end
