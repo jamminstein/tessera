@@ -3,7 +3,7 @@
 --
 -- multi repetitor rhythms
 -- ziggurat pitch chains
--- 4-voice spectral resynthesizer
+-- 4 channels: analog (MoogFF) or spectral (resynthesizer)
 --
 -- E1: page (rhythm/pitch/voice/fx)
 -- E2: select channel or param
@@ -57,30 +57,63 @@ local NOTE_NAMES = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"}
 local DIVISIONS = {1/4, 1/8, 1/16, 1/32}
 local DIV_NAMES = {"1/4", "1/8", "1/16", "1/32"}
 
-local VOICE_PARAMS = {
+local MODE_NAMES = {"analog", "spectral"}
+
+-- mode-specific param lists for voice page navigation
+local ANALOG_PARAMS = {
+  "saw", "pulse", "sub", "noise",
+  "detune", "pw", "cutoff", "res",
+  "drive", "env_mod", "drift", "decay", "release",
+  "amp", "delay_send"
+}
+
+local SPECTRAL_PARAMS = {
   "partials", "tilt", "spread", "drive",
   "peak1", "peak2", "peak_spread", "res",
   "env_mod", "drift", "decay", "release",
   "amp", "delay_send"
 }
 
+-- returns the active param list for a channel
+local function voice_params_for(ch)
+  local m = params:get("ch" .. ch .. "_mode")
+  if m == 1 then return ANALOG_PARAMS else return SPECTRAL_PARAMS end
+end
+
 local CH_PRESETS = {
-  -- ch1: ACID — tight partials, screaming resonant peaks, aggressive, left
-  {partials=4, tilt=0.8, spread=0.2, drive=1.2,
-   peak1=600, peak2=2200, peak_spread=0.3, res=0.85, env_mod=1.0,
-   drift=0.1, decay=0.2, release=0.1, amp=0.6, pan=-0.5, delay_send=0.3},
-  -- ch2: KICK — few partials, low peaks, punchy, center
-  {partials=2, tilt=2.5, spread=0.0, drive=1.8,
-   peak1=80, peak2=200, peak_spread=0.0, res=0.5, env_mod=1.0,
-   drift=0.0, decay=0.15, release=0.1, amp=0.85, pan=0.0, delay_send=0.0},
-  -- ch3: NOISE — max partials, wide spread, metallic, snappy, right
-  {partials=6, tilt=0.3, spread=0.8, drive=1.5,
-   peak1=1800, peak2=4500, peak_spread=0.6, res=0.7, env_mod=0.9,
-   drift=0.05, decay=0.06, release=0.03, amp=0.7, pan=0.5, delay_send=0.2},
-  -- ch4: DARK — detuned, drifting, spectral fog, wide, delay-heavy
-  {partials=5, tilt=1.5, spread=0.7, drive=0.4,
-   peak1=400, peak2=1200, peak_spread=0.5, res=0.35, env_mod=0.3,
-   drift=0.7, decay=1.5, release=1.0, amp=0.4, pan=0.7, delay_send=0.6},
+  -- ch1: ACID — analog mode, 303-style acid
+  {mode=0,
+   saw=0.9, pulse=0.0, sub=0.2, noise=0.0,
+   detune=0.15, pw=0.5, cutoff=800, res=0.8,
+   drive=1.0, env_mod=1.0,
+   drift=0.1, decay=0.2, release=0.1, amp=0.6, pan=-0.5, delay_send=0.3,
+   -- spectral defaults (kept in sync for mode switching)
+   partials=4, tilt=0.8, spread=0.2,
+   peak1=600, peak2=2200, peak_spread=0.3},
+  -- ch2: KICK — analog mode, sub bass
+  {mode=0,
+   saw=0.5, pulse=0.0, sub=0.9, noise=0.0,
+   detune=0.0, pw=0.5, cutoff=300, res=0.5,
+   drive=1.8, env_mod=1.0,
+   drift=0.0, decay=0.15, release=0.1, amp=0.85, pan=0.0, delay_send=0.0,
+   partials=2, tilt=2.5, spread=0.0,
+   peak1=80, peak2=200, peak_spread=0.0},
+  -- ch3: NOISE — spectral mode, metallic alien percussion
+  {mode=1,
+   saw=0.5, pulse=0.3, sub=0.0, noise=0.4,
+   detune=0.3, pw=0.5, cutoff=4000, res=0.7,
+   drive=1.5, env_mod=0.9,
+   drift=0.05, decay=0.06, release=0.03, amp=0.7, pan=0.5, delay_send=0.2,
+   partials=6, tilt=0.3, spread=0.8,
+   peak1=1800, peak2=4500, peak_spread=0.6},
+  -- ch4: DARK — spectral mode, drifting spectral fog
+  {mode=1,
+   saw=0.4, pulse=0.0, sub=0.3, noise=0.1,
+   detune=0.4, pw=0.5, cutoff=600, res=0.35,
+   drive=0.4, env_mod=0.3,
+   drift=0.7, decay=1.5, release=1.0, amp=0.4, pan=0.7, delay_send=0.6,
+   partials=5, tilt=1.5, spread=0.7,
+   peak1=400, peak2=1200, peak_spread=0.5},
 }
 
 local CH_LABELS = {"ACID", "KICK", "NOISE", "DARK"}
@@ -167,6 +200,44 @@ function init()
     local pre = CH_PRESETS[ch]
     params:add_separator("CH " .. ch .. " " .. CH_LABELS[ch])
 
+    -- engine mode: analog or spectral
+    params:add_option("ch" .. ch .. "_mode", "engine mode", MODE_NAMES, pre.mode + 1)
+    params:set_action("ch" .. ch .. "_mode", function(v)
+      engine.mode(ch - 1, v - 1)
+      sel_param = 1
+      screen_dirty = true
+    end)
+
+    -- analog-only params
+    params:add_control("ch" .. ch .. "_saw", "saw level",
+      controlspec.new(0, 1, 'lin', 0.01, pre.saw))
+    params:set_action("ch" .. ch .. "_saw", function(v) engine.saw(ch - 1, v) end)
+
+    params:add_control("ch" .. ch .. "_pulse", "pulse level",
+      controlspec.new(0, 1, 'lin', 0.01, pre.pulse))
+    params:set_action("ch" .. ch .. "_pulse", function(v) engine.pulse(ch - 1, v) end)
+
+    params:add_control("ch" .. ch .. "_sub", "sub level",
+      controlspec.new(0, 1, 'lin', 0.01, pre.sub))
+    params:set_action("ch" .. ch .. "_sub", function(v) engine.sub(ch - 1, v) end)
+
+    params:add_control("ch" .. ch .. "_noise", "noise level",
+      controlspec.new(0, 1, 'lin', 0.01, pre.noise))
+    params:set_action("ch" .. ch .. "_noise", function(v) engine.noise(ch - 1, v) end)
+
+    params:add_control("ch" .. ch .. "_detune", "detune",
+      controlspec.new(0, 1, 'lin', 0.01, pre.detune))
+    params:set_action("ch" .. ch .. "_detune", function(v) engine.detune(ch - 1, v) end)
+
+    params:add_control("ch" .. ch .. "_pw", "pulse width",
+      controlspec.new(0.05, 0.95, 'lin', 0.01, pre.pw))
+    params:set_action("ch" .. ch .. "_pw", function(v) engine.pw(ch - 1, v) end)
+
+    params:add_control("ch" .. ch .. "_cutoff", "cutoff",
+      controlspec.new(40, 18000, 'exp', 1, pre.cutoff, "hz"))
+    params:set_action("ch" .. ch .. "_cutoff", function(v) engine.cutoff(ch - 1, v) end)
+
+    -- spectral-only params
     params:add_control("ch" .. ch .. "_partials", "partials",
       controlspec.new(1, 6, 'lin', 1, pre.partials))
     params:set_action("ch" .. ch .. "_partials", function(v) engine.partials(ch - 1, v) end)
@@ -178,10 +249,6 @@ function init()
     params:add_control("ch" .. ch .. "_spread", "spread",
       controlspec.new(0, 1, 'lin', 0.01, pre.spread))
     params:set_action("ch" .. ch .. "_spread", function(v) engine.spread(ch - 1, v) end)
-
-    params:add_control("ch" .. ch .. "_drive", "drive",
-      controlspec.new(0, 2, 'lin', 0.01, pre.drive))
-    params:set_action("ch" .. ch .. "_drive", function(v) engine.drive(ch - 1, v) end)
 
     params:add_control("ch" .. ch .. "_peak1", "peak 1",
       controlspec.new(40, 8000, 'exp', 1, pre.peak1, "hz"))
@@ -195,11 +262,16 @@ function init()
       controlspec.new(0, 1, 'lin', 0.01, pre.peak_spread))
     params:set_action("ch" .. ch .. "_peak_spread", function(v) engine.peak_spread(ch - 1, v) end)
 
+    -- shared params
+    params:add_control("ch" .. ch .. "_drive", "drive",
+      controlspec.new(0, 2, 'lin', 0.01, pre.drive))
+    params:set_action("ch" .. ch .. "_drive", function(v) engine.drive(ch - 1, v) end)
+
     params:add_control("ch" .. ch .. "_res", "resonance",
       controlspec.new(0, 0.95, 'lin', 0.01, pre.res))
     params:set_action("ch" .. ch .. "_res", function(v) engine.res(ch - 1, v) end)
 
-    params:add_control("ch" .. ch .. "_env_mod", "env > peaks",
+    params:add_control("ch" .. ch .. "_env_mod", "env mod",
       controlspec.new(0, 1, 'lin', 0.01, pre.env_mod))
     params:set_action("ch" .. ch .. "_env_mod", function(v) engine.env_mod(ch - 1, v) end)
 
@@ -383,14 +455,16 @@ end
 
 function enter_freeze()
   frozen = true
-  -- retrigger all voices with long decay + spectral freeze
+  -- retrigger all voices with long decay + spectral freeze (spectral only)
   for ch = 1, 4 do
     local note = zig.channels[ch].last_note
     local freq = musicutil.note_num_to_freq(note)
     engine.slew(ch - 1, 0.5)
     engine.hz(ch - 1, freq)
     engine.accent(ch - 1, 0.6)
-    engine.freeze(ch - 1, 1)
+    if params:get("ch" .. ch .. "_mode") == 2 then
+      engine.freeze(ch - 1, 1)
+    end
     engine.gate(ch - 1, 1)
   end
   screen_dirty = true
@@ -399,9 +473,11 @@ end
 function release_freeze()
   frozen = false
   ratchet_queue = {}
-  -- release spectral freeze
+  -- release spectral freeze (spectral channels only)
   for ch = 1, 4 do
-    engine.freeze(ch - 1, 0)
+    if params:get("ch" .. ch .. "_mode") == 2 then
+      engine.freeze(ch - 1, 0)
+    end
   end
   screen_dirty = true
 end
@@ -416,7 +492,8 @@ function enc(n, d)
     sel_param = 1
   elseif n == 2 then
     if page == 3 then
-      sel_param = util.clamp(sel_param + d, 1, #VOICE_PARAMS)
+      local vp = voice_params_for(sel_ch)
+      sel_param = util.clamp(sel_param + d, 1, #vp)
     elseif page == 4 then
       sel_param = util.clamp(sel_param + d, 1, #FX_PARAMS)
     else
@@ -472,9 +549,12 @@ function enc_pitch(d)
 end
 
 function enc_voice(d)
-  local pname = VOICE_PARAMS[sel_param]
-  local pkey = "ch" .. sel_ch .. "_" .. pname
-  if params.lookup[pkey] then params:delta(pkey, d) end
+  local vp = voice_params_for(sel_ch)
+  local pname = vp[sel_param]
+  if pname then
+    local pkey = "ch" .. sel_ch .. "_" .. pname
+    if params.lookup[pkey] then params:delta(pkey, d) end
+  end
 end
 
 function enc_fx(d)
@@ -677,11 +757,97 @@ function draw_pitch()
 end
 
 function draw_voice()
+  local mode = params:get("ch" .. sel_ch .. "_mode")
+  local mode_label = MODE_NAMES[mode]
+
   screen.level(12)
   screen.move(50, 7)
   screen.text_right("CH" .. sel_ch .. " " .. CH_LABELS[sel_ch])
+  screen.level(6)
+  screen.move(78, 7)
+  screen.text(mode_label)
 
-  -- partial level bars (spectral view)
+  if mode == 1 then
+    draw_voice_analog()
+  else
+    draw_voice_spectral()
+  end
+
+  -- selected param readout
+  local vp = voice_params_for(sel_ch)
+  local pname = vp[sel_param]
+  if pname then
+    local pkey = "ch" .. sel_ch .. "_" .. pname
+    screen.level(10)
+    screen.move(1, 60)
+    if params.lookup[pkey] then
+      screen.text(pname:gsub("_", " ") .. ": " .. params:string(pkey))
+    end
+  end
+end
+
+function draw_voice_analog()
+  -- oscillator mixer bars
+  local osc_names = {"saw", "pls", "sub", "nse"}
+  local osc_keys = {"saw", "pulse", "sub", "noise"}
+  local bar_y = 13
+  local bar_w = 12
+  local bar_gap = 4
+  local bar_x0 = 4
+  for i = 1, 4 do
+    local x = bar_x0 + (i - 1) * (bar_w + bar_gap)
+    local val = params:get("ch" .. sel_ch .. "_" .. osc_keys[i])
+    local bh = math.floor(val * 14)
+    screen.level(val > 0.01 and 10 or 2)
+    screen.rect(x, bar_y + 14 - bh, bar_w, bh)
+    screen.fill()
+    screen.level(2)
+    screen.rect(x, bar_y, bar_w, 14)
+    screen.stroke()
+    screen.level(5)
+    screen.move(x + 1, bar_y + 18)
+    screen.text(osc_names[i])
+  end
+
+  -- MoogFF filter curve
+  local co = params:get("ch" .. sel_ch .. "_cutoff")
+  local r = params:get("ch" .. sel_ch .. "_res")
+  local drv = params:get("ch" .. sel_ch .. "_drive")
+  local filt_y = 42
+  local filt_h = 12
+
+  screen.level(8)
+  for x = 4, 124 do
+    local f = 40 * ((18000 / 40) ^ ((x - 4) / 120))
+    local ratio = f / co
+    -- approximate moog response: 4-pole with resonance bump
+    local lp_gain = 1 / (1 + ratio ^ 4)
+    local res_bump = r * 2 / (1 + ((ratio - 1) / 0.15) ^ 2)
+    local gain = math.min(lp_gain + res_bump, 1.4)
+    local y = filt_y - math.floor(gain * filt_h)
+    if x == 4 then screen.move(x, y) else screen.line(x, y) end
+  end
+  screen.stroke()
+
+  -- cutoff marker
+  local cox = 4 + math.floor(math.log(co / 40) / math.log(18000 / 40) * 120)
+  cox = util.clamp(cox, 4, 124)
+  screen.level(15)
+  screen.pixel(cox, filt_y - filt_h - 1)
+  screen.pixel(cox - 1, filt_y - filt_h)
+  screen.pixel(cox + 1, filt_y - filt_h)
+  screen.fill()
+
+  -- drive indicator
+  if drv > 0.1 then
+    screen.level(math.floor(util.linlin(0, 2, 3, 12, drv)))
+    screen.move(108, filt_y + 4)
+    screen.text("drv")
+  end
+end
+
+function draw_voice_spectral()
+  -- partial level bars
   local npart = params:get("ch" .. sel_ch .. "_partials")
   local tlt = params:get("ch" .. sel_ch .. "_tilt")
   local bar_y = 13
@@ -693,17 +859,14 @@ function draw_voice()
     local amp = 1 / ((i) ^ (tlt * 0.5))
     if i > npart then amp = 0 end
     local bh = math.floor(amp * 14)
-    -- bar from bottom up
     screen.level(i <= npart and 10 or 2)
     screen.rect(x, bar_y + 14 - bh, bar_w, bh)
     screen.fill()
-    -- outline
     screen.level(2)
     screen.rect(x, bar_y, bar_w, 14)
     screen.stroke()
   end
 
-  -- label
   screen.level(5)
   screen.move(bar_x0, bar_y + 18)
   screen.text("partials")
@@ -716,11 +879,9 @@ function draw_voice()
   local filt_y = 42
   local filt_h = 12
 
-  -- draw dual peak response curve
   screen.level(8)
   for x = 4, 124 do
     local f = 40 * ((12000 / 40) ^ ((x - 4) / 120))
-    -- two resonant peaks
     local ratio1 = f / p1
     local ratio2 = f / p2
     local bw = util.linlin(0, 0.95, 0.8, 0.03, r)
@@ -753,15 +914,6 @@ function draw_voice()
     screen.level(math.floor(util.linlin(0, 2, 3, 12, drv)))
     screen.move(108, filt_y + 4)
     screen.text("drv")
-  end
-
-  -- selected param readout
-  screen.level(10)
-  screen.move(1, 60)
-  local pname = VOICE_PARAMS[sel_param]
-  local pkey = "ch" .. sel_ch .. "_" .. pname
-  if params.lookup[pkey] then
-    screen.text(pname:gsub("_", " ") .. ": " .. params:string(pkey))
   end
 end
 
