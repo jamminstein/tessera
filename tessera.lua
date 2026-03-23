@@ -65,25 +65,25 @@ local VOICE_PARAMS = {
 }
 
 local CH_PRESETS = {
-  -- ch1: bright lead — detuned saws, open filter, wide stereo right
-  {saw=0.8, pulse=0.0, sub=0.0, noise=0.0,
-   detune=0.3, drive=0.5, cutoff=4500, res=0.35, env_mod=0.6,
-   drift=0.2, decay=0.5, release=0.4, amp=0.6, pan=-0.6, delay_send=0.35},
-  -- ch2: DEEP bass — sub + saw, very low cutoff, heavy drive, center
-  {saw=0.4, pulse=0.0, sub=1.0, noise=0.0,
-   detune=0.03, drive=1.2, cutoff=350, res=0.5, env_mod=0.8,
-   drift=0.04, decay=0.35, release=0.2, amp=0.75, pan=0.0, delay_send=0.05},
-  -- ch3: drum/perc — pulse + noise, tight, resonant, punchy
-  {saw=0.0, pulse=0.8, sub=0.3, noise=0.6,
-   detune=0.0, drive=0.8, cutoff=1500, res=0.7, env_mod=1.0,
-   drift=0.03, decay=0.08, release=0.05, amp=0.65, pan=0.5, delay_send=0.25},
-  -- ch4: texture — saw + noise, long tail, wide left, lots of delay
-  {saw=0.5, pulse=0.3, sub=0.0, noise=0.7,
-   detune=0.5, drive=0.3, cutoff=3000, res=0.2, env_mod=0.3,
-   drift=0.5, decay=2.0, release=1.5, amp=0.45, pan=0.6, delay_send=0.55},
+  -- ch1: acid line — saw, screaming filter, aggressive, left
+  {saw=0.9, pulse=0.0, sub=0.2, noise=0.0,
+   detune=0.15, drive=1.0, cutoff=800, res=0.8, env_mod=1.0,
+   drift=0.1, decay=0.2, release=0.1, amp=0.6, pan=-0.5, delay_send=0.3},
+  -- ch2: sub kick — sub + drive, very low, punchy, center
+  {saw=0.2, pulse=0.0, sub=1.0, noise=0.0,
+   detune=0.0, drive=1.5, cutoff=200, res=0.6, env_mod=1.0,
+   drift=0.0, decay=0.15, release=0.1, amp=0.85, pan=0.0, delay_send=0.0},
+  -- ch3: industrial perc — noise + pulse, distorted, snappy, right
+  {saw=0.0, pulse=0.5, sub=0.0, noise=0.9,
+   detune=0.0, drive=1.3, cutoff=2500, res=0.6, env_mod=0.9,
+   drift=0.05, decay=0.06, release=0.03, amp=0.7, pan=0.5, delay_send=0.2},
+  -- ch4: dark texture — detuned, noisy, long, wide right, delay-heavy
+  {saw=0.6, pulse=0.4, sub=0.0, noise=0.5,
+   detune=0.7, drive=0.6, cutoff=1800, res=0.3, env_mod=0.4,
+   drift=0.6, decay=1.5, release=1.0, amp=0.4, pan=0.7, delay_send=0.6},
 }
 
-local CH_LABELS = {"LEAD", "BASS", "PERC", "WASH"}
+local CH_LABELS = {"ACID", "KICK", "NOISE", "DARK"}
 
 local FX_PARAMS = {"delay_time", "delay_feedback", "delay_color", "delay_mix",
                     "halo", "reverb_mix", "reverb_size"}
@@ -99,12 +99,13 @@ function init()
 
   params:add_separator("TESSERA")
 
-  params:add_number("bpm", "BPM", 20, 300, 120)
+  params:add_number("bpm", "BPM", 20, 300, 130)
   params:set_action("bpm", function(v) params:set("clock_tempo", v) end)
 
   params:add_option("division", "division", DIV_NAMES, 3)
 
-  params:add_option("root", "root note", NOTE_NAMES, 1)
+  -- default to A (index 10) for dark minor feel
+  params:add_option("root", "root note", NOTE_NAMES, 10)
   params:set_action("root", function(v)
     zig:set_scale(v - 1, params:get("scale"))
   end)
@@ -113,7 +114,13 @@ function init()
   for i = 1, #musicutil.SCALES do
     scale_names[i] = musicutil.SCALES[i].name
   end
-  params:add_option("scale", "scale", scale_names, 1)
+  -- default to minor pentatonic (index 6 in musicutil) for dark/tribal feel
+  -- find minor pentatonic index
+  local default_scale = 1
+  for i = 1, #scale_names do
+    if scale_names[i] == "Minor Pentatonic" then default_scale = i; break end
+  end
+  params:add_option("scale", "scale", scale_names, default_scale)
   params:set_action("scale", function(v)
     zig:set_scale(params:get("root") - 1, v)
   end)
@@ -225,31 +232,31 @@ function init()
   params:add_separator("FX")
 
   params:add_control("delay_time", "delay time",
-    controlspec.new(0.01, 2.0, 'exp', 0.01, 0.375, "s"))
+    controlspec.new(0.01, 2.0, 'exp', 0.01, 0.3, "s"))
   params:set_action("delay_time", function(v) engine.delay_time(v) end)
 
   params:add_control("delay_feedback", "delay fb",
-    controlspec.new(0, 0.9, 'lin', 0.01, 0.45))
+    controlspec.new(0, 0.9, 'lin', 0.01, 0.6))
   params:set_action("delay_feedback", function(v) engine.delay_feedback(v) end)
 
   params:add_control("delay_color", "delay color",
-    controlspec.new(200, 12000, 'exp', 1, 3500, "hz"))
+    controlspec.new(200, 12000, 'exp', 1, 2500, "hz"))
   params:set_action("delay_color", function(v) engine.delay_color(v) end)
 
   params:add_control("delay_mix", "delay mix",
-    controlspec.new(0, 1, 'lin', 0.01, 0.3))
+    controlspec.new(0, 1, 'lin', 0.01, 0.4))
   params:set_action("delay_mix", function(v) engine.delay_mix(v) end)
 
   params:add_control("halo", "halo",
-    controlspec.new(0, 1, 'lin', 0.01, 0.25))
+    controlspec.new(0, 1, 'lin', 0.01, 0.4))
   params:set_action("halo", function(v) engine.halo(v) end)
 
   params:add_control("reverb_mix", "reverb mix",
-    controlspec.new(0, 1, 'lin', 0.01, 0.2))
+    controlspec.new(0, 1, 'lin', 0.01, 0.35))
   params:set_action("reverb_mix", function(v) engine.reverb_mix(v) end)
 
   params:add_control("reverb_size", "reverb size",
-    controlspec.new(0, 1, 'lin', 0.01, 0.8))
+    controlspec.new(0, 1, 'lin', 0.01, 0.9))
   params:set_action("reverb_size", function(v) engine.reverb_size(v) end)
 
   -- MIDI

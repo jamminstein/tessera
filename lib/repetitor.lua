@@ -163,14 +163,27 @@ function Repetitor.new()
       self.channels[i].probability[s] = 100
     end
   end
-  -- set varied defaults
-  self.channels[1].pulses = 4
-  self.channels[2].mode = 2   -- fibonacci
-  self.channels[3].pulses = 3
-  self.channels[4].mode = 4   -- golden
-  self.channels[4].pulses = 5
+  -- ch1 acid: euclidean 7/16 — driving but syncopated
+  self.channels[1].pulses = 7
+
+  -- ch2 kick: four on the floor
+  self.channels[2].mode = 5  -- traditional: 4floor
+
+  -- ch3 noise: offbeat 8ths (backbeat hats)
+  self.channels[3].mode = 8  -- traditional: 8ths
+  self.channels[3].offset = 1  -- offset by 1 for offbeat feel
+
+  -- ch4 dark: sparse euclidean 3/16
+  self.channels[4].pulses = 3
 
   for i = 1, 4 do self:regenerate(i) end
+
+  -- add some ratchets and probability to ch1 and ch3 for interest
+  self.channels[1].ratchets[5] = 2
+  self.channels[1].ratchets[13] = 3
+  self.channels[3].probability[4] = 50
+  self.channels[3].probability[8] = 75
+  self.channels[3].probability[12] = 50
   return self
 end
 

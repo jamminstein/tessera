@@ -43,53 +43,53 @@ function Ziggurat.new()
 
   self.channels = {}
 
-  -- ch1: lead arp (C4-C6)
+  -- ch1: acid line — hypnotic, one note hammering with octave jumps
   self.channels[1] = {
-    chain = {60, 64, 67, 72, 76, 72, 67, 64},
+    chain = {57, 57, 57, 60, 57, 55, 57, 69},
     chain_len = 8,
     position = 1,
     direction = 1,
     advance_mode = 1,
-    slew = 0.03,
-    range_lo = 55,
-    range_hi = 84,
-    last_note = 60,
+    slew = 0.02,
+    range_lo = 45,
+    range_hi = 76,
+    last_note = 57,
   }
-  -- ch2: bass (C2-C4)
+  -- ch2: sub kick — one low note, driving, relentless
   self.channels[2] = {
-    chain = {48, 48, 55, 53, 48},
-    chain_len = 5,
+    chain = {33, 33, 33, 33, 45, 33, 33, 33},
+    chain_len = 8,
     position = 1,
     direction = 1,
     advance_mode = 1,
-    slew = 0.08,
-    range_lo = 36,
-    range_hi = 60,
-    last_note = 48,
+    slew = 0.0,
+    range_lo = 24,
+    range_hi = 48,
+    last_note = 33,
   }
-  -- ch3: percussive mid (C3-C5)
+  -- ch3: noise perc — pitch is texture, not melody
   self.channels[3] = {
-    chain = {60, 55, 60, 62},
+    chain = {57, 60, 57, 64},
     chain_len = 4,
     position = 1,
     direction = 1,
     advance_mode = 4,
-    slew = 0.01,
-    range_lo = 48,
+    slew = 0.0,
+    range_lo = 40,
     range_hi = 72,
-    last_note = 60,
+    last_note = 57,
   }
-  -- ch4: melodic drift (G3-C6)
+  -- ch4: dark drone — fifths and octaves, slow drunk walk
   self.channels[4] = {
-    chain = {67, 69, 71, 72, 74, 76, 72, 69},
+    chain = {45, 52, 57, 45, 64, 57, 52, 45},
     chain_len = 8,
     position = 1,
     direction = 1,
     advance_mode = 5,
-    slew = 0.05,
-    range_lo = 55,
-    range_hi = 84,
-    last_note = 67,
+    slew = 0.15,
+    range_lo = 36,
+    range_hi = 72,
+    last_note = 45,
   }
 
   return self
