@@ -1,10 +1,6 @@
 // Engine_Tessera
-// Spectral resynthesis engine — 4 voices
-//
-// Each voice: selectable waveform (sine/saw/pulse/noise-band additive),
-// FM between partials, wavefolder, sub oscillator, noise layer,
-// dual resonant filter (QPAS-inspired), proper ADSR
-// Global: spectral delay w/ halo, resonant reverb
+// 4 voices: selectable waveform, FM, wavefolder, sub, noise, dual filter
+// Global: spectral delay w/ halo, shimmer reverb
 
 Engine_Tessera : CroneEngine {
   var voices;
@@ -19,93 +15,74 @@ Engine_Tessera : CroneEngine {
     delayBus = Bus.audio(context.server, 2);
     reverbBus = Bus.audio(context.server, 2);
 
-    // ── voice ────────────────────────────────────
     SynthDef(\tessera_voice, {
       arg out=0, delayOut=0,
           freq=220, amp=0.3, t_gate=0, accent=1,
-          // envelope
           atk=0.003, dec=0.4, sus=0.0, rel=0.3,
-          // timbre
-          waveform=0,  // 0=sine 1=saw 2=pulse 3=noise-band
-          partials=8, tilt=0.5, spread=0.008,
+          waveform=0, partials=8, tilt=0.5, spread=0.008,
           fmDepth=0, fmRatio=1.5,
-          fold=0, // wavefolder amount 0-5
-          subAmp=0, subOct=1, // sub osc: 0=off, oct 1 or 2
-          noiseAmp=0, noiseBW=200, // noise band layer
-          // filter
+          fold=0, subAmp=0, subOct=1,
+          noiseAmp=0, noiseBW=200,
           filterFreq=2000, filterQ=0.4,
-          filterType=0, // 0=lpf 1=bpf 2=hpf
-          filterEnv=0,  // envelope->filter mod depth (-1 to 1)
-          // modulation
+          filterType=0, filterEnv=0,
           freeze=0, smearRate=0.5,
           slewTime=0.05, pan=0, delaySend=0.3;
 
-      var sig, env, envFilter, portFreq, sub, noise;
+      var sig, env, envFilter, portFreq, sub, noise, fFreq, q;
 
       portFreq = Lag.kr(freq, slewTime);
 
-      // ADSR triggered by t_gate
       env = EnvGen.kr(
         Env.new([0, 1, sus.max(0.001), 0], [atk, dec, rel], [\lin, -3, -4]),
         t_gate
       ) * accent;
 
-      // filter envelope follower
       envFilter = EnvGen.kr(
         Env.new([0, 1, 0.3, 0], [atk, dec * 0.5, rel], [\lin, -2, -4]),
         t_gate
       );
 
-      // ── additive core ──────────────────────────
-      sig = Mix.fill(16, { |i|
-        var n = i + 1;
-        var pFreq = portFreq * n;
-        var pAmp = (1 / (n ** (1 + tilt.max(0)))) * (n <= partials);
-        var drift = LFNoise1.kr(smearRate + (i * 0.07)) * spread * pFreq;
+      sig = Mix.fill(16, { arg i;
+        var n, pFreq, pAmp, drift, fmMod, osc;
+        n = i + 1;
+        pFreq = portFreq * n;
+        pAmp = (1 / (n ** (1 + tilt.max(0)))) * (n <= partials);
+        drift = LFNoise1.kr(smearRate + (i * 0.07)) * spread * pFreq;
         drift = drift * (1 - freeze);
-
-        // FM between partials
-        var fmMod = SinOsc.ar(pFreq * fmRatio) * fmDepth * pFreq;
-
-        // waveform selection per partial
-        var osc = Select.ar(waveform, [
-          SinOsc.ar(pFreq + drift + fmMod),                      // 0: sine
-          LFSaw.ar(pFreq + drift + fmMod),                       // 1: saw
-          Pulse.ar(pFreq + drift + fmMod, 0.5 - (i * 0.02)),    // 2: pulse (varying width)
-          BPF.ar(WhiteNoise.ar, pFreq + drift, 0.02) * 20        // 3: noise bands
+        fmMod = SinOsc.ar(pFreq * fmRatio) * fmDepth * pFreq;
+        osc = Select.ar(waveform, [
+          SinOsc.ar(pFreq + drift + fmMod),
+          LFSaw.ar(pFreq + drift + fmMod),
+          Pulse.ar(pFreq + drift + fmMod, 0.5 - (i * 0.02).clip(0, 0.4)),
+          BPF.ar(WhiteNoise.ar, (pFreq + drift).max(20), 0.02) * 20
         ]);
-
         osc * pAmp;
       });
 
-      // ── wavefolder (Buchla / Make Noise style) ─
+      // wavefolder
       sig = Select.ar(fold > 0.01, [
         sig,
         (sig * (1 + (fold * 4))).fold2(1) * (1 / (1 + fold))
       ]);
 
-      // ── sub oscillator ─────────────────────────
+      // sub oscillator
       sub = SinOsc.ar(portFreq / (2 ** subOct)) * subAmp;
       sig = sig + sub;
 
-      // ── noise band layer ───────────────────────
-      noise = BPF.ar(PinkNoise.ar, portFreq, noiseBW / portFreq.max(20)) * noiseAmp * 8;
+      // noise band layer
+      noise = BPF.ar(PinkNoise.ar, portFreq.max(20), noiseBW / portFreq.max(20)) * noiseAmp * 8;
       sig = sig + noise;
 
-      // ── dual resonant filter (QPAS-inspired) ───
-      // filter freq modulated by envelope
-      {
-        var fFreq = (filterFreq * (1 + (envFilter * filterEnv * 4))).clip(20, 18000);
-        var q = filterQ.clip(0.05, 1);
-        sig = Select.ar(filterType, [
-          RLPF.ar(sig, fFreq, q),   // 0: LPF
-          BPF.ar(sig, fFreq, q) * 3, // 1: BPF (makeup gain)
-          RHPF.ar(sig, fFreq, q),    // 2: HPF
-        ]);
-      }.value;
+      // filter with envelope mod
+      fFreq = (filterFreq * (1 + (envFilter * filterEnv * 4))).clip(20, 18000);
+      q = filterQ.clip(0.05, 1);
+      sig = Select.ar(filterType, [
+        RLPF.ar(sig, fFreq, q),
+        BPF.ar(sig, fFreq, q) * 3,
+        RHPF.ar(sig, fFreq, q)
+      ]);
 
-      sig = sig * 2.5; // makeup gain
-
+      sig = sig * 2.5;
       sig = sig * env * amp;
       sig = Pan2.ar(sig, pan);
 
@@ -113,51 +90,36 @@ Engine_Tessera : CroneEngine {
       Out.ar(delayOut, sig * delaySend);
     }).add;
 
-    // ── spectral delay (Mimeophon-inspired) ──────
     SynthDef(\tessera_delay, {
       arg in=0, out=0,
           time=0.3, feedback=0.5, color=4000,
           mix=0.4, halo=0.3;
-
-      var sig, delayed, haloSig, fb;
-
+      var sig, delayed, haloSig;
       sig = In.ar(in, 2);
-
-      // feedback with soft clip to prevent blowup
       delayed = CombL.ar(sig, 2.0, time.clip(0.01, 2.0), feedback * 6);
-      delayed = delayed.tanh; // soft saturate feedback
+      delayed = delayed.tanh;
       delayed = LPF.ar(delayed, color.clip(200, 16000));
-
-      // halo: diffused allpass cloud
       haloSig = delayed;
-      4.do { |i|
+      4.do { arg i;
         haloSig = AllpassL.ar(haloSig, 0.5,
           LFNoise1.kr(0.05 + (i * 0.02)).range(0.02, 0.07 + (i * 0.02)),
           halo * 3);
       };
-
       Out.ar(out, haloSig * mix);
     }).add;
 
-    // ── reverb (Erbe-Verb inspired: resonant, metallic) ──
     SynthDef(\tessera_reverb, {
       arg in=0, out=0, mix=0.3, size=0.85, damp=0.5, shimmer=0;
-
       var sig, wet, shim;
       sig = In.ar(in, 2);
-
       wet = FreeVerb2.ar(sig[0], sig[1], mix, size, damp);
-
-      // shimmer: pitch-shifted reverb tail
       shim = PitchShift.ar(wet, 0.2, 2.0, 0.01, 0.05) * shimmer * 0.3;
       wet = wet + shim;
-
       Out.ar(out, wet);
     }).add;
 
     context.server.sync;
 
-    // ── instantiate ──────────────────────────────
     voices = Array.fill(4, {
       Synth(\tessera_voice, [
         \out, reverbBus, \delayOut, delayBus
@@ -172,7 +134,6 @@ Engine_Tessera : CroneEngine {
       \in, reverbBus, \out, context.out_b
     ]);
 
-    // ── voice commands ───────────────────────────
     this.addCommand("hz",          "if", { |msg| voices[msg[1].asInteger].set(\freq, msg[2]) });
     this.addCommand("amp",         "if", { |msg| voices[msg[1].asInteger].set(\amp, msg[2]) });
     this.addCommand("gate",        "ii", { |msg| voices[msg[1].asInteger].set(\t_gate, msg[2]) });
@@ -202,7 +163,6 @@ Engine_Tessera : CroneEngine {
     this.addCommand("pan",         "if", { |msg| voices[msg[1].asInteger].set(\pan, msg[2]) });
     this.addCommand("accent",      "if", { |msg| voices[msg[1].asInteger].set(\accent, msg[2]) });
 
-    // ── global FX commands ───────────────────────
     this.addCommand("delay_time",     "f", { |msg| delaySynth.set(\time, msg[1]) });
     this.addCommand("delay_feedback", "f", { |msg| delaySynth.set(\feedback, msg[1]) });
     this.addCommand("delay_color",    "f", { |msg| delaySynth.set(\color, msg[1]) });
